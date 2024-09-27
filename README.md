@@ -11,13 +11,15 @@ A user-friendly tool for annotating video subtitles by selecting speakers and li
 - **Save and Load:** Save progress anytime and load existing annotations.
 - **CSV Export:** Saves annotations in CSV with UTF-8 BOM for compatibility.
 
+**Screen shot**
+![screenshot](./screenshot.png)
+
 ## Installation
 
 1. **Clone the Repository**  
    ```
    git clone https://github.com/yourusername/video-annotation-tool.git  
    ```
-   Navigate into the directory: cd video-annotation-tool
 
 2. **Install Dependencies** 
    ```
