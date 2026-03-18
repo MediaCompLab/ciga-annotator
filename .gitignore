@@ -1,7 +1,12 @@
-*.srt
 *.mp4
+*.mkv
+*.avi
+*.mov
+*.srt
 *.csv
 *.txt
+*.vat
+*.exe
 
 # Ignore OS generated files
 .DS_Store
@@ -32,3 +37,5 @@ Thumbs.db
 # Ignore backup files
 *.bak
 *.backup
+*.spec
+__pycache__/

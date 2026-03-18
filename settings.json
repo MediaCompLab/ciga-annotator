@@ -1,0 +1,20 @@
+{
+    "auto_pause": false,
+    "inherit_listener": false,
+    "inherit_target": false,
+    "only_uncoded": false,
+    "hotkeys": {
+        "play_pause": "Space",
+        "next_uncoded": "N",
+        "prev_subtitle": "Up",
+        "next_subtitle": "Down",
+        "seek_back": "Left",
+        "seek_forward": "Right",
+        "role_speakers": "Ctrl+1",
+        "role_listeners": "Ctrl+2",
+        "role_targets": "Ctrl+3",
+        "cycle_role": "Ctrl+Q",
+        "focus_search": "Ctrl+F",
+        "shortcuts_help": "F1"
+    }
+}
