@@ -333,8 +333,9 @@ class VideoAnnotator(QMainWindow):
         msg_box.setTextFormat(Qt.RichText)
         msg_box.setText(
             "<h3>CIGA: Character Interaction and Graph Analysis</h3>"
-            "<p><b>Video Annotator</b></p>"
-            "<p>A powerful tool for annotating video character interactions.</p>"
+            "<p><b>CIGA Annotator</b></p>"
+            "<p><b>Version: 1.0.0</b></p>"
+            "<p>A annotation tool for character interaction graph analysis.</p>"
             "<p><i>Developed by: <a href='http://mediacomplab.com'>Media Comprehension Lab</a></i></p>"
             "<p>For more information, visit our <a href='https://github.com/MediaComprehensionLab/CIGA'>GitHub Repository</a>.</p>"
             "<p>If you find CIGA useful, please consider citing our work:"
