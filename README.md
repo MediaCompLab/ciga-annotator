@@ -1,4 +1,4 @@
-# Video Annotation Tool
+# Ciga Annotator
 
 A subtitle-centric video annotation tool with an Aegisub-like layout, keyboard-first coding workflow, and CSV export.
 
