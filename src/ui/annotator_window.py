@@ -6,9 +6,9 @@ import tempfile
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel,
-    QFileDialog, QPushButton, QLineEdit, QHBoxLayout, QTableWidget, 
+    QFileDialog, QPushButton, QLineEdit, QHBoxLayout, QTableWidget,
     QTableWidgetItem, QSizePolicy, QMessageBox, QHeaderView,
-    QSplitter, QAbstractItemView, QSlider
+    QSplitter, QAbstractItemView, QSlider, QInputDialog
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -38,6 +38,7 @@ class VideoAnnotator(QMainWindow):
         self.vat_file = vat_file
         self.is_dirty = False
         self.annotations = {}
+        self.custom_columns = ['Note']
 
         if self.vat_file:
             # Load project details from .vat JSON
@@ -53,6 +54,8 @@ class VideoAnnotator(QMainWindow):
                 loaded_ann = project_data.get('annotations', {})
                 self.annotations = {int(k): v for k, v in loaded_ann.items()}
                 
+                self.custom_columns = project_data.get('custom_columns', ['Note'])
+
                 # Make paths absolute relative to the vat file folder if they are relative
                 vat_dir = Path(self.vat_file).parent
                 if not Path(video_file).is_absolute():
@@ -62,6 +65,60 @@ class VideoAnnotator(QMainWindow):
                 if self.char_file and not Path(self.char_file).is_absolute():
                     self.char_file = str(vat_dir / self.char_file)
                     
+                # Ensure files exist, prompt if they don't
+                is_file_updated = False
+                if video_file and not Path(video_file).exists():
+                    QMessageBox.warning(self, "Missing File", f"Cannot find video file:\n{video_file}\nPlease select its new location.")
+                    new_video, _ = QFileDialog.getOpenFileName(self, "Locate Video File", str(vat_dir), "Video Files (*.mp4 *.mkv *.avi);;All Files (*)")
+                    if new_video:
+                        video_file = new_video
+                        is_file_updated = True
+                    else:
+                        raise FileNotFoundError("Video file not found and user canceled selection.")
+
+                if srt_file and not Path(srt_file).exists():
+                    QMessageBox.warning(self, "Missing File", f"Cannot find subtitle file:\n{srt_file}\nPlease select its new location.")
+                    new_srt, _ = QFileDialog.getOpenFileName(self, "Locate Subtitle File", str(vat_dir), "Subtitle Files (*.srt);;All Files (*)")
+                    if new_srt:
+                        srt_file = new_srt
+                        is_file_updated = True
+                    else:
+                        raise FileNotFoundError("Subtitle file not found and user canceled selection.")
+
+                if self.char_file and not Path(self.char_file).exists():
+                    QMessageBox.warning(self, "Missing File", f"Cannot find character file:\n{self.char_file}\nPlease select its new location (optional).")
+                    new_char, _ = QFileDialog.getOpenFileName(self, "Locate Character File", str(vat_dir), "Text Files (*.txt);;All Files (*)")
+                    if new_char:
+                        self.char_file = new_char
+                        is_file_updated = True
+                    else:
+                        self.char_file = "" # Optional, so just clear it if canceled
+                        is_file_updated = True
+
+                if is_file_updated:
+                    # Update paths back to being relative to the vat file dir. 
+                    # If they are on a different drive, they'll remain absolute, which is acceptable
+                    try:
+                        project_data['video_file'] = str(Path(video_file).relative_to(vat_dir))
+                    except ValueError:
+                        project_data['video_file'] = video_file
+
+                    try:
+                        project_data['srt_file'] = str(Path(srt_file).relative_to(vat_dir))
+                    except ValueError:
+                        project_data['srt_file'] = srt_file
+
+                    if self.char_file:
+                        try:
+                            project_data['char_file'] = str(Path(self.char_file).relative_to(vat_dir))
+                        except ValueError:
+                            project_data['char_file'] = self.char_file
+                    else:
+                        project_data['char_file'] = ""
+
+                    with open(self.vat_file, 'w', encoding='utf-8') as f:
+                        json.dump(project_data, f, indent=4)
+                    self.is_dirty = True
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load project file: {e}")
                 QTimer.singleShot(0, self.request_new_project.emit)
@@ -101,8 +158,20 @@ class VideoAnnotator(QMainWindow):
         srt_base = Path(self.srt_file).name
         self.autosave_path = str(Path(self.srt_file).parent / f".{srt_base}.autosave.vat")
 
+        # Video Section first to ensure seek_slider exists before duration_changed triggers
+        self.play_pause_btn = QPushButton("Pause")
+        self.play_pause_btn.clicked.connect(self.handle_spacebar)
+        self.seek_slider = QSlider(Qt.Horizontal)
+        self.seek_slider.setRange(0, 0)
+        self.seek_slider.sliderPressed.connect(self.on_seek_slider_pressed)
+        self.seek_slider.sliderReleased.connect(self.on_seek_slider_released)
+        self.seek_slider.sliderMoved.connect(self.on_seek_slider_moved)
+        self.time_label = QLabel("00:00 / 00:00")
+        self.time_label.setMinimumWidth(110)
+
         # Media Player
         self.mediaPlayer = QMediaPlayer()
+
         self.videoWidget = QVideoWidget()
         self.audioOutput = QAudioOutput()
         self.mediaPlayer.setAudioOutput(self.audioOutput)
@@ -122,10 +191,26 @@ class VideoAnnotator(QMainWindow):
 
         # Controls UI
         self.character_table = QTableWidget()
+        self.character_table.itemChanged.connect(self.on_character_table_item_changed)
+        
+        # Override table key press for delete handling
+        original_key_press = self.character_table.keyPressEvent
+        def table_key_press(event):
+            if event.key() == Qt.Key_Escape:
+                self.character_table.clearFocus()
+                self.setFocus()
+            elif event.key() == Qt.Key_Delete:
+                self.delete_selected_character()
+            else:
+                original_key_press(event)
+        self.character_table.keyPressEvent = table_key_press
+        
         self.setup_character_table(self.character_table)
 
-        self.manage_char_btn = QPushButton("Manage Characters && Shortcuts")
-        self.manage_char_btn.clicked.connect(self.open_manage_characters_dialog)
+        # Global shortcut for adding new character
+        from PySide6.QtGui import QShortcut, QKeySequence
+        self.new_char_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
+        self.new_char_shortcut.activated.connect(self.focus_new_character_row)
 
         self.speaker_summary = QLineEdit()
         self.speaker_summary.setReadOnly(True)
@@ -139,7 +224,6 @@ class VideoAnnotator(QMainWindow):
         self.note_edit.textChanged.connect(self.on_note_text_changed)
 
         management_layout = QVBoxLayout()
-        management_layout.addWidget(self.manage_char_btn)
         management_layout.addWidget(self.character_table)
         management_widget = QWidget()
         management_widget.setLayout(management_layout)
@@ -177,17 +261,7 @@ class VideoAnnotator(QMainWindow):
         controls_widget.setLayout(controls_outer_layout)
         controls_widget.setMinimumWidth(320)
 
-        # Video Section
-        self.play_pause_btn = QPushButton("Pause")
-        self.play_pause_btn.clicked.connect(self.handle_spacebar)
-        self.seek_slider = QSlider(Qt.Horizontal)
-        self.seek_slider.setRange(0, 0)
-        self.seek_slider.sliderPressed.connect(self.on_seek_slider_pressed)
-        self.seek_slider.sliderReleased.connect(self.on_seek_slider_released)
-        self.seek_slider.sliderMoved.connect(self.on_seek_slider_moved)
-        self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setMinimumWidth(110)
-
+        # Video Layout
         player_controls_layout = QHBoxLayout()
         player_controls_layout.addWidget(self.play_pause_btn)
         player_controls_layout.addWidget(self.seek_slider, 1)
@@ -216,6 +290,11 @@ class VideoAnnotator(QMainWindow):
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search subtitle text...")
         self.search_edit.textChanged.connect(self.apply_subtitle_filters)
+        
+        self.add_column_btn = QPushButton("+ Column")
+        self.add_column_btn.clicked.connect(self.add_custom_column)
+        self.add_column_btn.setMaximumWidth(80)
+        
         self.next_uncoded_btn = QPushButton("Next Uncoded")
         self.next_uncoded_btn.clicked.connect(self.jump_to_next_uncoded)
         self.next_uncoded_btn.setMaximumWidth(120)
@@ -225,6 +304,7 @@ class VideoAnnotator(QMainWindow):
 
         filter_bar = QHBoxLayout()
         filter_bar.addWidget(self.search_edit, 1)
+        filter_bar.addWidget(self.add_column_btn)
         filter_bar.addWidget(self.next_uncoded_btn)
         filter_bar.addWidget(self.clear_filters_btn)
 
@@ -344,40 +424,35 @@ class VideoAnnotator(QMainWindow):
         msg_box.exec()
 
     def setup_character_table(self, table):
+        self._updating_table = True
         num_characters = len(self.characters)
-        columns = 4
-        rows = (num_characters + columns - 1) // columns
-        if rows == 0: rows = 1
-        table.setRowCount(rows)
-        table.setColumnCount(columns)
-        table.setSelectionMode(QTableWidget.MultiSelection)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.horizontalHeader().hide()
+        table.setRowCount(num_characters + 1)
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["Name", "Key"])
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.verticalHeader().hide()
-        table.setShowGrid(True)
-        table.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
 
-        for row in range(rows):
-            table.setRowHeight(row, 25)
-        table.setMaximumHeight((rows * 25) + 2)
+        for row, char_info in enumerate(self.characters):
+            name_item = QTableWidgetItem(char_info['name'])
+            key_item = QTableWidgetItem(char_info.get('key', ''))
+            table.setItem(row, 0, name_item)
+            table.setItem(row, 1, key_item)
 
-        idx = 0
-        for row in range(rows):
-            for col in range(columns):
-                if idx < num_characters:
-                    char_info = self.characters[idx]
-                    display_text = f"{char_info['name']} ({char_info['key']})" if char_info.get('key') else char_info['name']
-                    item = QTableWidgetItem(display_text)
-                    item.setData(Qt.UserRole, char_info['name'])
-                    item.setTextAlignment(Qt.AlignCenter)
-                    table.setItem(row, col, item)
-                else:
-                    item = QTableWidgetItem("")
-                    item.setFlags(Qt.NoItemFlags)
-                    table.setItem(row, col, item)
-                idx += 1
+        # Empty row for new character
+        empty_name_item = QTableWidgetItem()
+        empty_name_item.setToolTip("Type new character name and press Enter")
+        empty_name_item.setText("")
+        empty_name_item.setForeground(QColor("gray"))
+        
+        empty_key_item = QTableWidgetItem()
+        
+        table.setItem(num_characters, 0, empty_name_item)
+        table.setItem(num_characters, 1, empty_key_item)
+        
+        self._updating_table = False
 
     def refresh_role_summary(self):
         self.speaker_summary.setText(', '.join(self.current_speakers))
@@ -438,46 +513,116 @@ class VideoAnnotator(QMainWindow):
         self.current_targets = [name for name in self.current_targets if name in valid_names]
         self.refresh_role_summary()
 
-    def open_manage_characters_dialog(self):
-        dialog = ManageCharactersDialog(self.characters, self)
-        if dialog.exec():
-            new_chars = dialog.get_data()
-            
-            used_keys = set()
-            for c in new_chars:
-                k = (c['key'] or "").strip().upper()
-                if k in [' ']:
-                    QMessageBox.warning(self, "Invalid Shortcut", f"Shortcut '{k}' is reserved.")
-                    return
-                if k and len(k) != 1:
-                    QMessageBox.warning(self, "Invalid Shortcut", f"Shortcut '{k}' must be a single key.")
-                    return
-                if k and not k.isprintable():
-                    QMessageBox.warning(self, "Invalid Shortcut", "Shortcut must be a printable key.")
-                    return
-                if k:
-                    if k in used_keys:
-                        QMessageBox.warning(self, "Duplicate Shortcut", f"Shortcut '{k}' is used multiple times.")
-                        return
-                    used_keys.add(k)
-                c['key'] = k if k else None
-                    
-            self.characters = new_chars
+    def delete_selected_character(self):
+        selected = self.character_table.selectedItems()
+        if not selected:
+            return
+        
+        row = selected[0].row()
+        if row >= len(self.characters):
+            return  # Can't delete the new character placeholder row
+        
+        reply = QMessageBox.question(
+            self, 'Delete Character',
+            f"Are you sure you want to delete character '{self.characters[row]['name']}'?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            del self.characters[row]
             save_characters(self.char_file, self.characters)
-
             self.setup_character_table(self.character_table)
             self.sanitize_role_values()
             self.is_dirty = True
             self.update_progress_status()
 
+    def on_character_table_item_changed(self, item):
+        if hasattr(self, '_updating_table') and self._updating_table:
+            return
+
+        row = item.row()
+        col = item.column()
+        text = item.text().strip()
+        
+        is_new_row = (row == len(self.characters))
+        
+        if is_new_row:
+            if not text:
+                return
+            
+            # If they typed in Name col for new character
+            if col == 0:
+                name = text
+                # auto-assign shortcut
+                used_keys = {str(c.get('key', '')).upper() for c in self.characters if c.get('key')}
+                assigned_key = None
+                for i in range(1, 10):
+                    if str(i) not in used_keys:
+                        assigned_key = str(i)
+                        break
+                
+                self.characters.append({'name': name, 'key': assigned_key})
+                save_characters(self.char_file, self.characters)
+                self.setup_character_table(self.character_table)
+                self.sanitize_role_values()
+                self.is_dirty = True
+                self.update_progress_status()
+                
+                # Automatically focus the newly created placeholder row
+                QTimer.singleShot(0, self.focus_new_character_row)
+        else:
+            # Editing existing
+            if col == 0:
+                if not text:
+                    # Restore previous if emptied, or maybe delete? Let's just restore.
+                    self._updating_table = True
+                    item.setText(self.characters[row]['name'])
+                    self._updating_table = False
+                    return
+                self.characters[row]['name'] = text
+            elif col == 1:
+                k = text.upper()
+                if k and (len(k) != 1 or not k.isprintable() or k == ' '):
+                    QMessageBox.warning(self, "Invalid Shortcut", "Shortcut must be a single printable key.")
+                    self._updating_table = True
+                    item.setText(self.characters[row].get('key', '') or '')
+                    self._updating_table = False
+                    return
+                
+                if k:
+                    # Check duplicates
+                    used_keys = {str(c.get('key', '')).upper(): idx for idx, c in enumerate(self.characters) if c.get('key')}
+                    if k in used_keys and used_keys[k] != row:
+                        QMessageBox.warning(self, "Duplicate Shortcut", f"Shortcut '{k}' is already used.")
+                        self._updating_table = True
+                        item.setText(self.characters[row].get('key', '') or '')
+                        self._updating_table = False
+                        return
+                    self.characters[row]['key'] = k
+                else:
+                    self.characters[row]['key'] = None
+                    
+            save_characters(self.char_file, self.characters)
+            self.setup_character_table(self.character_table) # Re-render to ensure styling and proper state
+            self.sanitize_role_values()
+            self.is_dirty = True
+            self.update_progress_status()
+
+    def focus_new_character_row(self):
+        new_row = len(self.characters)
+        item = self.character_table.item(new_row, 0)
+        self.character_table.setCurrentItem(item)
+        self.character_table.editItem(item)
+
     def setup_subtitle_list(self):
-        self.subtitle_list.setColumnCount(9)
-        self.subtitle_list.setHorizontalHeaderLabels(["#", "Start", "End", "Text", "Speaker", "Listener", "Target", "Status", "Note"])
+        base_cols = ["#", "Start", "End", "Text", "Speaker", "Listener", "Target"]
+        total_cols = len(base_cols) + len(self.custom_columns)
+        self.subtitle_list.setColumnCount(total_cols)
+        self.subtitle_list.setHorizontalHeaderLabels(base_cols + self.custom_columns)
         self.subtitle_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.subtitle_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.subtitle_list.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.subtitle_list.setFocusPolicy(Qt.NoFocus) # Keeps playback/navigation shortcuts available.
-        
+
         self.subtitle_list.setRowCount(len(self.subtitles))
         for i, sub in enumerate(self.subtitles):
             self.subtitle_list.setItem(i, 0, self._make_readonly_item(str(sub['index'])))
@@ -487,8 +632,12 @@ class VideoAnnotator(QMainWindow):
             self.subtitle_list.setItem(i, 4, self._make_readonly_item(""))
             self.subtitle_list.setItem(i, 5, self._make_readonly_item(""))
             self.subtitle_list.setItem(i, 6, self._make_readonly_item(""))
-            self.subtitle_list.setItem(i, 7, self._make_readonly_item("Uncoded"))
-            self.subtitle_list.setItem(i, 8, QTableWidgetItem(""))
+            
+            for j, c in enumerate(self.custom_columns):
+                val = self.annotations.get(i, {}).get(c, "")
+                if not val and c == "Note":
+                    val = self.annotations.get(i, {}).get("note", "")
+                self.subtitle_list.setItem(i, 7 + j, QTableWidgetItem(val))
 
         self.subtitle_list.setColumnWidth(0, 45)
         self.subtitle_list.setColumnWidth(1, 90)
@@ -496,9 +645,9 @@ class VideoAnnotator(QMainWindow):
         self.subtitle_list.setColumnWidth(4, 140)
         self.subtitle_list.setColumnWidth(5, 140)
         self.subtitle_list.setColumnWidth(6, 140)
-        self.subtitle_list.setColumnWidth(7, 90)
-        self.subtitle_list.setColumnWidth(8, 220)
-        self.subtitle_list.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        for j in range(len(self.custom_columns)):
+            self.subtitle_list.setColumnWidth(7 + j, 220)
+            
         self.subtitle_list.itemClicked.connect(self.on_subtitle_clicked)
         self.subtitle_list.itemChanged.connect(self.on_subtitle_item_changed)
         self.apply_subtitle_filters()
@@ -512,6 +661,28 @@ class VideoAnnotator(QMainWindow):
         self.search_edit.clear()
         self.app_settings.set("only_uncoded", False)
         self.apply_subtitle_filters()
+
+    def add_custom_column(self):
+        col_name, ok = QInputDialog.getText(self, "Add Custom Column", "Column Name:")
+        if ok and col_name:
+            col_name = col_name.strip()
+            if col_name and col_name not in self.custom_columns:
+                self.custom_columns.append(col_name)
+                
+                col_idx = 6 + len(self.custom_columns)
+                self.subtitle_list.insertColumn(col_idx)
+                
+                base_cols = ["#", "Start", "End", "Text", "Speaker", "Listener", "Target"]
+                self.subtitle_list.setHorizontalHeaderLabels(base_cols + self.custom_columns)
+                
+                self._updating_table = True
+                for i in range(len(self.subtitles)):
+                    val = self.annotations.get(i, {}).get(col_name, "")
+                    self.subtitle_list.setItem(i, col_idx, QTableWidgetItem(val))
+                self.subtitle_list.setColumnWidth(col_idx, 220)
+                self._updating_table = False
+                
+                self.is_dirty = True
 
     def apply_subtitle_filters(self):
         query = self.search_edit.text().strip().lower()
@@ -567,15 +738,24 @@ class VideoAnnotator(QMainWindow):
     def on_subtitle_item_changed(self, item):
         if self._updating_table:
             return
-        if item.column() != 8:
+        col = item.column()
+        if col < 7:
             return
         row = item.row()
-        ann = self.annotations.get(row, {'speakers': [], 'listeners': [], 'targets': [], 'note': ''})
-        ann['note'] = item.text().strip()
+        ann = self.annotations.get(row, {'speakers': [], 'listeners': [], 'targets': []})
+        
+        col_idx = col - 7
+        if col_idx < len(self.custom_columns):
+            col_name = self.custom_columns[col_idx]
+            ann[col_name] = item.text().strip()
+            if col_name == "Note":
+                ann["note"] = item.text().strip()
+                
         self.annotations[row] = ann
         if row == self.current_subtitle_index:
             self._updating_table = True
-            self.note_edit.setText(ann.get('note', ''))
+            if "Note" in self.custom_columns and col_idx < len(self.custom_columns) and self.custom_columns[col_idx] == "Note":
+                self.note_edit.setText(ann.get('note', ''))
             self._updating_table = False
             self.current_speakers = list(ann.get('speakers', []))
             self.current_listeners = list(ann.get('listeners', []))
@@ -634,15 +814,18 @@ class VideoAnnotator(QMainWindow):
         speakers = ann.get('speakers', [])
         listeners = ann.get('listeners', [])
         targets = ann.get('targets', [])
-        note = ann.get('note', '')
         status = self.get_annotation_status(index)
 
         self._updating_table = True
         self.subtitle_list.setItem(index, 4, self._make_readonly_item(', '.join(speakers)))
         self.subtitle_list.setItem(index, 5, self._make_readonly_item(', '.join(listeners)))
         self.subtitle_list.setItem(index, 6, self._make_readonly_item(', '.join(targets)))
-        self.subtitle_list.setItem(index, 7, self._make_readonly_item(status))
-        self.subtitle_list.setItem(index, 8, QTableWidgetItem(note))
+        
+        for j, c in enumerate(self.custom_columns):
+            val = ann.get(c, "")
+            if not val and c == "Note":
+                val = ann.get("note", "")
+            self.subtitle_list.setItem(index, 7 + j, QTableWidgetItem(val))
 
         if status == "Done":
             status_color = QColor(40, 167, 69, 50)
@@ -651,9 +834,10 @@ class VideoAnnotator(QMainWindow):
         else:
             status_color = None
 
-        for col in range(9):
+        col_count = 7 + len(self.custom_columns)
+        for col in range(col_count):
             if self.subtitle_list.item(index, col):
-                if col == 7 and status_color:
+                if col == 0 and status_color:
                     self.subtitle_list.item(index, col).setBackground(status_color)
                 else:
                     self.subtitle_list.item(index, col).setData(Qt.BackgroundRole, None)
@@ -708,15 +892,13 @@ class VideoAnnotator(QMainWindow):
         if not speakers and not listeners and not targets and not note and index not in self.annotations:
             return # nothing to record
             
-        self.annotations[index] = {
-            'speakers': speakers,
-            'listeners': listeners,
-            'targets': targets,
-            'note': note
-        }
-        self.is_dirty = True
+        ann = self.annotations.get(index, {})
+        ann['speakers'] = speakers
+        ann['listeners'] = listeners
+        ann['targets'] = targets
+        ann['note'] = note
         
-        self.refresh_subtitle_row(index)
+        self.annotations[index] = ann
 
         if clear_selections:
             self.current_speakers = []
@@ -753,7 +935,7 @@ class VideoAnnotator(QMainWindow):
                 return True
                 
             focused = QApplication.focusWidget()
-            if focused in [self.search_edit, self.note_edit]:
+            if isinstance(focused, QLineEdit) or focused is self.character_table:
                 return False
                 
             if self._is_hotkey(event, "next_uncoded"):
@@ -954,6 +1136,7 @@ class VideoAnnotator(QMainWindow):
                 "srt_file": rel_path(self.srt_file),
                 "char_file": rel_path(self.char_file),
                 "characters": self.characters,
+                "custom_columns": getattr(self, 'custom_columns', ['Note']),
                 "annotations": self.annotations
             }
             target = Path(file_path)
@@ -988,18 +1171,37 @@ class VideoAnnotator(QMainWindow):
                 spk = ', '.join(ann.get('speakers', []))
                 lst = ', '.join(ann.get('listeners', []))
                 tgt = ', '.join(ann.get('targets', []))
-                note = ann.get('note', '')
-                if spk or lst or tgt or note:
-                    rows.append({
-                        'line': sub['text'],
-                        'start_time': milliseconds_to_srt_time(sub['start_time']),
-                        'end_time': milliseconds_to_srt_time(sub['end_time']),
-                        'speakers': spk,
-                        'listeners': lst,
-                        'targets': tgt,
-                        'note': note
-                    })
-            write_rows_to_csv_atomic(file_path, rows)
+                has_custom = False
+                
+                row_data = {
+                    'line': sub['text'],
+                    'start_time': milliseconds_to_srt_time(sub['start_time']),
+                    'end_time': milliseconds_to_srt_time(sub['end_time']),
+                    'speakers': spk,
+                    'listeners': lst,
+                    'targets': tgt
+                }
+                
+                for c in getattr(self, 'custom_columns', ['Note']):
+                    val = ann.get(c, "")
+                    if not val and c == "Note":
+                        val = ann.get('note', '')
+                    row_data[c] = val
+                    if val.strip():
+                        has_custom = True
+                        
+                if spk or lst or tgt or has_custom:
+                    rows.append(row_data)
+
+            if rows:
+                fieldnames = ['line', 'start_time', 'end_time', 'speakers', 'listeners', 'targets'] + getattr(self, 'custom_columns', ['Note'])
+                # write_rows_to_csv_atomic assumes dicts with standard keys, but we can override it if we write it locally here.
+                # Actually write_rows_to_csv_atomic in utils checks keys of dicts. Let's just use it and rely on its dict handling.
+            if rows:
+                fieldnames = ['line', 'start_time', 'end_time', 'speakers', 'listeners', 'targets'] + getattr(self, 'custom_columns', ['Note'])
+            else:
+                fieldnames = None
+            write_rows_to_csv_atomic(file_path, rows, fieldnames=fieldnames)
             self.is_dirty = False
             self.update_progress_status()
             QMessageBox.information(self, "Success", f"Annotations saved to {file_path}")
@@ -1016,34 +1218,50 @@ class VideoAnnotator(QMainWindow):
             with open(file_path, 'r', newline='', encoding='utf-8-sig') as csvfile:
                 reader = csv.DictReader(csvfile)
                 loaded_data = list(reader)
-                
+                if loaded_data:
+                    # Capture any new custom columns from the CSV
+                    base_fields = {'line', 'start_time', 'end_time', 'speakers', 'listeners', 'targets'}
+                    csv_fields = set(reader.fieldnames) if reader.fieldnames else set(loaded_data[0].keys())
+                    new_cols = [f for f in csv_fields if f not in base_fields and f not in self.custom_columns and f != 'note']
+                    if new_cols:
+                        self.custom_columns.extend(new_cols)
+                        
+                    # Reconfigure table columns if needed
+                    self.setup_subtitle_list()
+
             self.annotations.clear()
+            col_count = 7 + len(self.custom_columns)
             for i in range(len(self.subtitles)):
                 self.subtitle_list.setItem(i, 4, self._make_readonly_item(""))
                 self.subtitle_list.setItem(i, 5, self._make_readonly_item(""))
                 self.subtitle_list.setItem(i, 6, self._make_readonly_item(""))
-                self.subtitle_list.setItem(i, 7, self._make_readonly_item("Uncoded"))
-                self.subtitle_list.setItem(i, 8, QTableWidgetItem(""))
-                for col in range(9):
+                for j in range(len(self.custom_columns)):
+                    self.subtitle_list.setItem(i, 7 + j, QTableWidgetItem(""))
+                for col in range(col_count):
                     if self.subtitle_list.item(i, col):
-                        self.subtitle_list.item(i, col).setBackground(QColor(255, 255, 255))
+                        self.subtitle_list.item(i, col).setData(Qt.BackgroundRole, None)
 
             for row in loaded_data:
                 for i, sub in enumerate(self.subtitles):
-                    if (milliseconds_to_srt_time(sub['start_time']) == row.get('start_time') and 
+                    if (milliseconds_to_srt_time(sub['start_time']) == row.get('start_time') and
                         milliseconds_to_srt_time(sub['end_time']) == row.get('end_time')):
-                        
-                        self.annotations[i] = {
+
+                        ann = {
                             'speakers': [s.strip() for s in row.get('speakers', '').split(',')] if row.get('speakers') else [],
                             'listeners': [s.strip() for s in row.get('listeners', '').split(',')] if row.get('listeners') else [],
-                            'targets': [s.strip() for s in row.get('targets', '').split(',')] if row.get('targets') else [],
-                            'note': row.get('note', '').strip()
+                            'targets': [s.strip() for s in row.get('targets', '').split(',')] if row.get('targets') else []
                         }
                         
+                        for c in self.custom_columns:
+                            ann[c] = row.get(c, '').strip()
+                        if 'note' in row:
+                            ann['note'] = row.get('note', '').strip()
+                        
+                        self.annotations[i] = ann
                         self.refresh_subtitle_row(i)
                         break
 
-            self.is_dirty = False
+            self.is_dirty = True
             self.jump_to_subtitle(self.current_subtitle_index)
             self.apply_subtitle_filters()
             self.update_progress_status()
