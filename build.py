@@ -14,6 +14,7 @@ PyInstaller.__main__.run([
     '--windowed',
     '--onefile',
     '--clean',
+    '--icon=../logo_black.png',
     f'--add-data=../logo_black.png{os.pathsep}.',
     f'--add-data=../logo_white.png{os.pathsep}.',
     '--collect-all=PySide6',
