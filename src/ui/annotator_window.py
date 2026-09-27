@@ -1,13 +1,9 @@
 import csv
-import json
-import os
-import sys
-import tempfile
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel,
     QFileDialog, QPushButton, QLineEdit, QHBoxLayout, QTableWidget,
-    QTableWidgetItem, QSizePolicy, QMessageBox, QHeaderView,
+    QTableWidgetItem, QMessageBox, QHeaderView,
     QSplitter, QAbstractItemView, QSlider, QInputDialog
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -17,10 +13,13 @@ from PySide6.QtGui import QAction, QColor, QKeySequence
 
 from src.core.app_settings import AppSettings
 from src.ui.settings_dialog import SettingsDialog
-from src.ui.char_dialog import ManageCharactersDialog
 from src.core.parsers import parse_srt, milliseconds_to_srt_time
-from src.core.characters import read_characters, save_characters
+from src.core.characters import get_base_dir, read_characters, save_characters, validate_character_name
 from src.core.csv_utils import write_rows_to_csv_atomic
+from src.core.project import (
+    AUTOSAVE_OF_KEY, autosave_is_recoverable, autosave_path_for, read_project_file,
+    remove_file_quietly, write_project_file,
+)
 
 class VideoAnnotator(QMainWindow):
     request_new_project = Signal()
@@ -37,14 +36,14 @@ class VideoAnnotator(QMainWindow):
         
         self.vat_file = vat_file
         self.is_dirty = False
+        self._recovered_from_autosave = False
         self.annotations = {}
         self.custom_columns = ['Note']
 
         if self.vat_file:
             # Load project details from .vat JSON
             try:
-                with open(self.vat_file, 'r', encoding='utf-8') as f:
-                    project_data = json.load(f)
+                project_data = read_project_file(self.vat_file)
                 video_file = project_data.get('video_file', '')
                 srt_file = project_data.get('srt_file', '')
                 self.char_file = project_data.get('char_file', '')
@@ -116,20 +115,21 @@ class VideoAnnotator(QMainWindow):
                     else:
                         project_data['char_file'] = ""
 
-                    with open(self.vat_file, 'w', encoding='utf-8') as f:
-                        json.dump(project_data, f, indent=4)
+                    write_project_file(self.vat_file, project_data)
                     self.is_dirty = True
+
+                if AUTOSAVE_OF_KEY in project_data:
+                    # Recovered from an autosave: keep working on the project it belongs
+                    # to (or an unsaved session), never on the hidden autosave file.
+                    self.vat_file = project_data[AUTOSAVE_OF_KEY]
+                    self.is_dirty = True
+                    self._recovered_from_autosave = True
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load project file: {e}")
                 QTimer.singleShot(0, self.request_new_project.emit)
                 return
         else:
             if not char_file:
-                def get_base_dir():
-                    if getattr(sys, 'frozen', False):
-                        return Path(sys.executable).parent
-                    else:
-                        return Path(__file__).parent.parent.parent
                 char_file = str(get_base_dir() / "characters.txt")
             self.char_file = char_file
             self.characters = read_characters(self.char_file)
@@ -137,10 +137,7 @@ class VideoAnnotator(QMainWindow):
         self.video_file = video_file
         self.srt_file = srt_file
 
-        if self.vat_file:
-            self.setWindowTitle(f"CIGA Annotator - {Path(self.vat_file).name}")
-        else:
-            self.setWindowTitle(f"CIGA Annotator - {Path(self.srt_file).name}")
+        self.update_window_title()
 
         self.subtitles = parse_srt(self.srt_file)
         if not self.subtitles:
@@ -154,9 +151,9 @@ class VideoAnnotator(QMainWindow):
         self.active_role = 'speakers'
         self._updating_table = False
         self.slider_is_dragging = False
-        
-        srt_base = Path(self.srt_file).name
-        self.autosave_path = str(Path(self.srt_file).parent / f".{srt_base}.autosave.vat")
+        # Autosave files this session wrote or recovered from; all are removed once the
+        # work is saved or explicitly discarded (the location moves on "Save As").
+        self._autosave_files = {self.autosave_path}
 
         # Video Section first to ensure seek_slider exists before duration_changed triggers
         self.play_pause_btn = QPushButton("Pause")
@@ -350,6 +347,14 @@ class VideoAnnotator(QMainWindow):
 
         self.mediaPlayer.play()
         self.jump_to_subtitle(self.current_subtitle_index)
+
+    @property
+    def autosave_path(self):
+        return autosave_path_for(self.vat_file, self.srt_file)
+
+    def update_window_title(self):
+        name = Path(self.vat_file).name if self.vat_file else Path(self.srt_file).name
+        self.setWindowTitle(f"CIGA Annotator - {name}")
 
     def create_menu_bar(self):
         menu_bar = self.menuBar()
@@ -551,6 +556,13 @@ class VideoAnnotator(QMainWindow):
             
             # If they typed in Name col for new character
             if col == 0:
+                error = validate_character_name(text)
+                if error:
+                    QMessageBox.warning(self, "Invalid Name", error)
+                    self._updating_table = True
+                    item.setText("")
+                    self._updating_table = False
+                    return
                 name = text
                 # auto-assign shortcut
                 used_keys = {str(c.get('key', '')).upper() for c in self.characters if c.get('key')}
@@ -572,8 +584,11 @@ class VideoAnnotator(QMainWindow):
         else:
             # Editing existing
             if col == 0:
-                if not text:
-                    # Restore previous if emptied, or maybe delete? Let's just restore.
+                error = validate_character_name(text)
+                if error:
+                    # Emptied or invalid: restore the previous name.
+                    if text:
+                        QMessageBox.warning(self, "Invalid Name", error)
                     self._updating_table = True
                     item.setText(self.characters[row]['name'])
                     self._updating_table = False
@@ -1101,57 +1116,55 @@ class VideoAnnotator(QMainWindow):
             self.request_open_project.emit(vat_file)
 
     def save_project(self):
+        """Save to the current project, asking for a location first if there is none.
+
+        Returns True only if the project was written.
+        """
         self.record_annotation(self.current_subtitle_index, clear_selections=False)
-        if hasattr(self, 'vat_file') and self.vat_file:
-            self._write_project_file(self.vat_file)
-            self.is_dirty = False
-            self.update_progress_status()
-        else:
-            self.save_project_as_dialog()
+        if not self.vat_file:
+            return self.save_project_as_dialog()
+        return self._save_to(self.vat_file)
 
     def save_project_as_dialog(self):
         self.record_annotation(self.current_subtitle_index, clear_selections=False)
         save_path, _ = QFileDialog.getSaveFileName(self, "Save Project", "project.vat", "VAT Projects (*.vat)")
-        if save_path:
-            self.vat_file = save_path
-            self._write_project_file(self.vat_file)
-            self.is_dirty = False
-            self.update_progress_status()
-            
-    def _write_project_file(self, file_path):
-        try:
-            # We must use paths relative to the vat file where possible, or just store absolute.
-            # Storing absolute is easier but less portable. Let's use pure filenames if in same dir, or absolute.
-            vat_dir = Path(file_path).parent
-            
-            def rel_path(p):
-                if not p: return ""
-                try:
-                    return str(Path(p).relative_to(vat_dir))
-                except ValueError:
-                    return str(Path(p).absolute())
+        if not save_path:
+            return False
+        return self._save_to(save_path)
 
-            project_data = {
-                "video_file": rel_path(self.video_file),
-                "srt_file": rel_path(self.srt_file),
-                "char_file": rel_path(self.char_file),
-                "characters": self.characters,
-                "custom_columns": getattr(self, 'custom_columns', ['Note']),
-                "annotations": self.annotations
-            }
-            target = Path(file_path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp_path = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
-            os.close(fd)
-            try:
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(project_data, f, indent=4)
-                os.replace(tmp_path, file_path)
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+    def _save_to(self, file_path):
+        try:
+            write_project_file(file_path, self._project_data(file_path))
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save project: {e}")
+            return False
+        self.vat_file = file_path
+        self.is_dirty = False
+        self.discard_autosave()
+        self.update_window_title()
+        self.update_progress_status()
+        return True
+
+    def _project_data(self, file_path):
+        # Paths are stored relative to the project file where possible, so a project
+        # folder can be moved; files on another drive stay absolute.
+        vat_dir = Path(file_path).parent
+
+        def rel_path(p):
+            if not p: return ""
+            try:
+                return str(Path(p).relative_to(vat_dir))
+            except ValueError:
+                return str(Path(p).absolute())
+
+        return {
+            "video_file": rel_path(self.video_file),
+            "srt_file": rel_path(self.srt_file),
+            "char_file": rel_path(self.char_file),
+            "characters": self.characters,
+            "custom_columns": getattr(self, 'custom_columns', ['Note']),
+            "annotations": self.annotations
+        }
 
     def export_csv_dialog(self):
         self.record_annotation(self.current_subtitle_index, clear_selections=False)
@@ -1193,10 +1206,6 @@ class VideoAnnotator(QMainWindow):
                 if spk or lst or tgt or has_custom:
                     rows.append(row_data)
 
-            if rows:
-                fieldnames = ['line', 'start_time', 'end_time', 'speakers', 'listeners', 'targets'] + getattr(self, 'custom_columns', ['Note'])
-                # write_rows_to_csv_atomic assumes dicts with standard keys, but we can override it if we write it locally here.
-                # Actually write_rows_to_csv_atomic in utils checks keys of dicts. Let's just use it and rely on its dict handling.
             if rows:
                 fieldnames = ['line', 'start_time', 'end_time', 'speakers', 'listeners', 'targets'] + getattr(self, 'custom_columns', ['Note'])
             else:
@@ -1287,35 +1296,46 @@ class VideoAnnotator(QMainWindow):
         )
 
     def autosave_annotations(self):
+        """Write a crash-recovery copy; the user's project file is only written on save."""
         if not self.is_dirty:
             return
-        
-        # Determine the target autosave path
-        save_target = self.vat_file if hasattr(self, 'vat_file') and self.vat_file else self.autosave_path
-            
+        path = self.autosave_path
         try:
             self.record_annotation(self.current_subtitle_index, clear_selections=False)
-            self._write_project_file(save_target)
-        except Exception:
-            # Autosave should never interrupt annotation flow.
-            pass
+            project_data = self._project_data(path)
+            project_data[AUTOSAVE_OF_KEY] = str(Path(self.vat_file).absolute()) if self.vat_file else ""
+            write_project_file(path, project_data)
+            self._autosave_files.add(path)
+        except Exception as e:
+            # Autosave must never interrupt annotation, but a failure should be visible.
+            self.statusBar().showMessage(f"Autosave failed: {e}", 10000)
+
+    def discard_autosave(self):
+        """Remove the crash-recovery copies once the work is saved or discarded."""
+        for path in getattr(self, '_autosave_files', set()):
+            try:
+                remove_file_quietly(path)
+            except OSError as e:
+                self.statusBar().showMessage(f"Could not remove autosave {path}: {e}", 10000)
+        if hasattr(self, '_autosave_files'):
+            self._autosave_files.clear()
 
     def try_restore_autosave(self):
-        # We don't need to restore autosave if we are explicitly opening a vat project,
-        # since the vat project is the autosave target itself if it exists.
-        if hasattr(self, 'vat_file') and self.vat_file:
+        if self._recovered_from_autosave:
             return
-            
-        if not os.path.exists(self.autosave_path):
+        path = self.autosave_path
+        if not autosave_is_recoverable(path, self.vat_file):
             return
         reply = QMessageBox.question(
             self,
             "Restore Autosave",
-            f"Found autosave project:\n{self.autosave_path}\n\nRestore it now?",
+            f"Found unsaved work from a previous session:\n{path}\n\nRestore it now?",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            self.request_open_project.emit(self.autosave_path)
+            # This window is closed to open the recovered one; keep the file it reads.
+            self._autosave_files.discard(path)
+            self.request_open_project.emit(path)
 
     def closeEvent(self, event):
         if self.is_dirty:
@@ -1328,17 +1348,13 @@ class VideoAnnotator(QMainWindow):
             if reply == QMessageBox.Cancel:
                 event.ignore()
                 return
-            if reply == QMessageBox.Yes:
-                if hasattr(self, 'vat_file') and self.vat_file:
-                    self.save_project()
-                else:
-                    save_path, _ = QFileDialog.getSaveFileName(self, "Save Project", "project.vat", "VAT Projects (*.vat)")
-                    if not save_path:
-                        event.ignore()
-                        return
-                    self.vat_file = save_path
-                    self.save_project()
-        self.autosave_timer.stop()
+            if reply == QMessageBox.Yes and not self.save_project():
+                event.ignore()
+                return
+        # Saved, discarded, or nothing to save: the recovery copy is no longer needed.
+        self.discard_autosave()
+        if hasattr(self, 'autosave_timer'):
+            self.autosave_timer.stop()
         event.accept()
 
     @Slot(str)

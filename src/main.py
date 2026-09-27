@@ -9,10 +9,8 @@ from src.ui.annotator_window import VideoAnnotator
 def get_resource_path(filename):
     if hasattr(sys, "_MEIPASS"):
         return os.path.join(sys._MEIPASS, filename)
-    else:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        ciga_root = os.path.dirname(os.path.dirname(current_dir))
-        return os.path.join(ciga_root, filename)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(repo_root, "assets", filename)
 
 def main():
     app = QApplication(sys.argv)
@@ -28,11 +26,21 @@ def main():
     app.main_window = MainWindow()
     app.main_window.show()
 
+    def close_annotator():
+        """Close the current annotator; False if the user cancelled at the save prompt."""
+        annotator = getattr(app, 'video_annotator', None)
+        if annotator is None:
+            return True
+        if not annotator.close():
+            return False
+        app.removeEventFilter(annotator)
+        app.video_annotator = None
+        return True
+
     def start_annotation(video_file, srt_file, char_file, vat_file):
-        if hasattr(app, 'video_annotator') and app.video_annotator:
-            app.removeEventFilter(app.video_annotator)
-            app.video_annotator.close()
-            
+        if not close_annotator():
+            return
+
         app.video_annotator = VideoAnnotator(video_file, srt_file, char_file, vat_file)
         # Hook up "New Project" signal from main window to reset
         app.video_annotator.request_new_project.connect(reset_to_main_window)
@@ -42,10 +50,8 @@ def main():
         app.installEventFilter(app.video_annotator)
 
     def reset_to_main_window():
-        app.removeEventFilter(app.video_annotator)
-        app.video_annotator.close()
-        app.video_annotator = None
-        app.main_window.show()
+        if close_annotator():
+            app.main_window.show()
 
     app.main_window.start_annotation.connect(start_annotation)
     sys.exit(app.exec())
