@@ -5,6 +5,8 @@
 *.srt
 *.csv
 *.txt
+!requirements*.txt
+!characters.example.txt
 *.vat
 *.exe
 
@@ -39,3 +41,8 @@ Thumbs.db
 *.backup
 *.spec
 __pycache__/
+
+# Per-user state written by the app
+settings.json
+.pytest_cache/
+.pytest_tmp/

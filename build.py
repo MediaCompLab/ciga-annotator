@@ -1,5 +1,4 @@
 import PyInstaller.__main__
-from pathlib import Path
 import shutil
 import os
 
@@ -14,9 +13,9 @@ PyInstaller.__main__.run([
     '--windowed',
     '--onefile',
     '--clean',
-    '--icon=../logo_black.png',
-    f'--add-data=../logo_black.png{os.pathsep}.',
-    f'--add-data=../logo_white.png{os.pathsep}.',
+    '--icon=assets/logo_black.png',
+    f'--add-data=assets/logo_black.png{os.pathsep}.',
+    f'--add-data=assets/logo_white.png{os.pathsep}.',
     '--collect-all=PySide6',
     '--collect-all=shiboken6',
 ])
