@@ -8,6 +8,19 @@ def get_base_dir():
     else:
         return Path(__file__).parent.parent.parent
 
+def validate_character_name(name):
+    """Return an error message for an unusable character name, or None if it is valid.
+
+    Commas separate characters in exported CSV cells and in CIGA's speaker/listener
+    columns, so a name containing one would silently become two characters.
+    """
+    if not name or not name.strip():
+        return "Character name cannot be empty."
+    if ',' in name:
+        return "Character names cannot contain commas; commas separate characters in the exported CSV."
+    return None
+
+
 def read_characters(char_file):
     if not char_file or not os.path.exists(char_file):
         return []

@@ -26,8 +26,8 @@
 - **Editable Note column:** Fill per-line notes either from right panel Note input or directly in the table.
 - **Player controls:** Built-in play/pause button, timeline slider, and current/total time display.
 - **Coding template options:** Optional inheritance of Listener/Target from the previous line.
-- **Autosave + restore:** Periodic autosave with optional restore prompt on startup.
-- **Unsaved-change protection:** Save/discard/cancel prompt when closing.
+- **Autosave + restore:** Every 15 seconds unsaved work is copied to a hidden recovery file (`.<name>.autosave.vat`) next to the project, or next to the subtitles before the first save. Your project file is only written when you save. After a crash, the next session offers to restore the recovery file.
+- **Unsaved-change protection:** Save/discard/cancel prompt when closing. Choosing not to save discards the changes and the recovery file.
 - **Safer writes:** Manual save and autosave use atomic write replacement to reduce data corruption risk.
 - **CSV import/export:** Save and load annotation progress in UTF-8 BOM CSV.
 
@@ -39,7 +39,7 @@
 1. **Clone the Repository**  
    ```
    git clone https://github.com/MediaCompLab/ciga-annotator.git
-   cd ciga/ciga-annotator
+   cd ciga-annotator
    ```
 
 2. **Install Dependencies** 
@@ -49,21 +49,25 @@
 
 ## Getting Started
 
-1. **Run the Application** 
+1. **Run the Application** (from the repository root)
    ```
-   python src/main.py
+   python run.py
    ```
 
    If you are on Windows and get a Qt DLL load error in a Conda terminal, run with your system Python explicitly, for example:
    ```
-   c:/python313/python.exe src/main.py
+   c:/python313/python.exe run.py
    ```
 
 2. **Select Files**  
-   Select your video and SRT files. Character file is optional.
+   Select your video and SRT files. Character file is optional; see `characters.example.txt`.
    If provided, each line can be:
    - `CharacterName`
    - `CharacterName,ShortcutKey`
+
+   Character names cannot contain commas, because commas separate characters in the exported CSV
+   and in CIGA's input. Without a character file, the annotator keeps its list in `characters.txt`
+   next to the application.
 
 3. **Start Annotation**  
    Click "Start Annotation" to begin. The player auto-pauses at subtitle boundaries for coding.
@@ -84,6 +88,15 @@
 4. Turn on `Only show uncoded` to focus on remaining lines.
 5. Use `Inherit Listener/Target from previous line` to reduce repeated coding in dialogue runs.
 6. Use `N` (or `Next Uncoded` button) to jump through remaining work quickly.
+
+## Development
+
+```
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+To build the Windows executable: `python build.py`.
 
 ## Contributing
 

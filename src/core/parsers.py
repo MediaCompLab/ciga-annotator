@@ -1,42 +1,61 @@
 import re
 import chardet
 
-def parse_srt(srt_file):
-    print('srt_file', srt_file)
-    pattern = re.compile(
-        r'(\d+)\s+([\d:,]+)\s*-->\s*([\d:,]+)\s*(.*?)\s*(?=\n\d+|\Z)',
-        re.DOTALL
-    )
+# "00:00:01,000 --> 00:00:02,000", with "." also accepted as the millisecond separator
+# and anything after the end time (cue settings such as "X1:40") ignored.
+TIMING_PATTERN = re.compile(
+    r'^\s*(\d+:\d{1,2}:\d{1,2}[,.]\d+)\s*-->\s*(\d+:\d{1,2}:\d{1,2}[,.]\d+)'
+)
+BLOCK_SEPARATOR = re.compile(r'\n[ \t]*\n')
 
-    with open(srt_file, 'rb') as f:
-        raw_data = f.read()
 
-    result = chardet.detect(raw_data)
-    encoding = result['encoding']
-    if not encoding:
-        encoding = 'utf-8'
-
+def _decode(raw_data):
+    encoding = chardet.detect(raw_data)['encoding'] or 'utf-8'
     try:
         content = raw_data.decode(encoding)
     except (UnicodeDecodeError, LookupError):
         content = raw_data.decode('latin-1')
+    return content.lstrip('﻿').replace('\r\n', '\n').replace('\r', '\n')
 
-    content = content.replace('\r\n', '\n').replace('\r', '\n')
 
-    matches = re.findall(pattern, content)
-    subtitles = []
-    for match in matches:
-        index = int(match[0])
-        start_time = srt_time_to_milliseconds(match[1])
-        end_time = srt_time_to_milliseconds(match[2])
-        text = match[3].replace('\n', ' ').strip()
-        subtitles.append({
+def _parse_block(block, fallback_index):
+    """Parse one cue: an optional index line, the timing line, then the text lines."""
+    lines = block.strip('\n').split('\n')
+    for position, line in enumerate(lines[:2]):
+        timing = TIMING_PATTERN.match(line)
+        if not timing:
+            continue
+        index = fallback_index
+        if position == 1 and lines[0].strip().isdigit():
+            index = int(lines[0].strip())
+        text = ' '.join(part.strip() for part in lines[position + 1:] if part.strip())
+        return {
             'index': index,
-            'start_time': start_time,
-            'end_time': end_time,
-            'text': text
-        })
+            'start_time': srt_time_to_milliseconds(timing.group(1)),
+            'end_time': srt_time_to_milliseconds(timing.group(2)),
+            'text': text,
+        }
+    return None
+
+
+def parse_srt(srt_file):
+    """Parse an SRT file into cues.
+
+    Cues are split on blank lines rather than on "a newline followed by digits",
+    so a text line that starts with a number stays part of its cue.
+    """
+    with open(srt_file, 'rb') as f:
+        content = _decode(f.read())
+
+    subtitles = []
+    for block in BLOCK_SEPARATOR.split(content):
+        if not block.strip():
+            continue
+        cue = _parse_block(block, len(subtitles) + 1)
+        if cue is not None:
+            subtitles.append(cue)
     return subtitles
+
 
 def srt_time_to_milliseconds(srt_time):
     try:
