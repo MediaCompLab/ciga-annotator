@@ -1,8 +1,8 @@
+import copy
 import json
 import os
 import sys
 from pathlib import Path
-from PySide6.QtCore import Qt
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
@@ -35,7 +35,9 @@ DEFAULT_SETTINGS = {
 
 class AppSettings:
     def __init__(self):
-        self.settings = DEFAULT_SETTINGS.copy()
+        # Deep copy: a shallow copy shares the nested "hotkeys" dict, so rebinding a
+        # key would also rewrite DEFAULT_SETTINGS and break "Reset to Default".
+        self.settings = copy.deepcopy(DEFAULT_SETTINGS)
         self.load()
 
     def load(self):
@@ -43,11 +45,11 @@ class AppSettings:
             try:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
-                    # Merge loaded into default to preserve missing keys
-                    self.settings.update(loaded)
-                    if "hotkeys" in loaded:
-                        for k, v in loaded["hotkeys"].items():
-                            self.settings["hotkeys"][k] = v
+                # Merge loaded into the defaults so missing keys (including individual
+                # hotkeys) keep their default values.
+                loaded_hotkeys = loaded.pop("hotkeys", {})
+                self.settings.update(loaded)
+                self.settings["hotkeys"].update(loaded_hotkeys)
             except Exception as e:
                 print(f"Failed to load settings: {e}")
 
