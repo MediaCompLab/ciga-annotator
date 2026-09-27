@@ -20,6 +20,28 @@ def autosave_path_for(vat_file, srt_file):
     return str(anchor.parent / f".{anchor.name}.autosave.vat")
 
 
+def _same_path(a, b):
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def recovery_target(autosave_file, project_data, srt_file):
+    """Project a recovered autosave should be saved to, or None if it cannot be trusted.
+
+    Returns the recorded project path ("" for a session never saved to a project) only
+    when that project's autosave location is this very file. An autosave carried along
+    by copying or moving a project folder still names the original project, and saving
+    the recovered work there would overwrite a different project.
+    """
+    if not isinstance(project_data, dict):
+        return None
+    owner = project_data.get(AUTOSAVE_OF_KEY)
+    if not isinstance(owner, str):
+        return None
+    if not _same_path(autosave_path_for(owner, srt_file), autosave_file):
+        return None
+    return owner
+
+
 def write_project_file(file_path, project_data):
     """Write JSON atomically; on any failure the previous file is left untouched.
 

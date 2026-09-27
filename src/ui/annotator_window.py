@@ -17,7 +17,7 @@ from src.core.parsers import parse_srt, milliseconds_to_srt_time
 from src.core.characters import get_base_dir, read_characters, save_characters, validate_character_name
 from src.core.csv_utils import write_rows_to_csv_atomic
 from src.core.project import (
-    AUTOSAVE_OF_KEY, autosave_is_recoverable, autosave_path_for, read_project_file,
+    AUTOSAVE_OF_KEY, autosave_is_recoverable, autosave_path_for, read_project_file, recovery_target,
     remove_file_quietly, write_project_file,
 )
 
@@ -120,8 +120,12 @@ class VideoAnnotator(QMainWindow):
 
                 if AUTOSAVE_OF_KEY in project_data:
                     # Recovered from an autosave: keep working on the project it belongs
-                    # to (or an unsaved session), never on the hidden autosave file.
-                    self.vat_file = project_data[AUTOSAVE_OF_KEY]
+                    # to, never on the hidden autosave file. If its recorded owner does
+                    # not match where it lives (a copied folder), continue as an unsaved
+                    # session so Save asks for a location instead of overwriting another
+                    # project.
+                    target = recovery_target(self.vat_file, project_data, srt_file)
+                    self.vat_file = target or ""
                     self.is_dirty = True
                     self._recovered_from_autosave = True
             except Exception as e:
@@ -1325,6 +1329,14 @@ class VideoAnnotator(QMainWindow):
             return
         path = self.autosave_path
         if not autosave_is_recoverable(path, self.vat_file):
+            return
+        # Offer only an autosave recorded for this very project (or unsaved session);
+        # one carried in by copying a project folder names the original project.
+        try:
+            owner = recovery_target(path, read_project_file(path), self.srt_file)
+        except (OSError, ValueError):
+            owner = None  # unreadable or malformed: nothing trustworthy to restore
+        if owner is None:
             return
         reply = QMessageBox.question(
             self,

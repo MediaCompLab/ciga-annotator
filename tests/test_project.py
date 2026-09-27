@@ -69,3 +69,36 @@ def test_remove_file_quietly(tmp_path):
     project.remove_file_quietly(str(path))
 
     assert not path.exists()
+
+
+def test_recovery_target_accepts_matching_metadata(tmp_path):
+    vat = tmp_path / "study.vat"
+    srt = tmp_path / "ep1.srt"
+    autosave = project.autosave_path_for(str(vat), str(srt))
+
+    assert project.recovery_target(autosave, {project.AUTOSAVE_OF_KEY: str(vat)}, str(srt)) == str(vat)
+
+
+def test_recovery_target_accepts_an_unsaved_session(tmp_path):
+    srt = tmp_path / "ep1.srt"
+    autosave = project.autosave_path_for("", str(srt))
+
+    assert project.recovery_target(autosave, {project.AUTOSAVE_OF_KEY: ""}, str(srt)) == ""
+
+
+def test_recovery_target_rejects_an_autosave_pointing_at_another_project(tmp_path):
+    # A copied project folder carries an autosave whose metadata still names the
+    # original project; saving there would overwrite the wrong project.
+    original = tmp_path / "original" / "study.vat"
+    copy = tmp_path / "copy" / "study.vat"
+    srt = tmp_path / "copy" / "ep1.srt"
+    autosave_in_copy = project.autosave_path_for(str(copy), str(srt))
+
+    assert project.recovery_target(autosave_in_copy, {project.AUTOSAVE_OF_KEY: str(original)}, str(srt)) is None
+
+
+@pytest.mark.parametrize("data", [{}, {project.AUTOSAVE_OF_KEY: None}, {project.AUTOSAVE_OF_KEY: 3}, []])
+def test_recovery_target_rejects_malformed_metadata(tmp_path, data):
+    srt = tmp_path / "ep1.srt"
+
+    assert project.recovery_target(project.autosave_path_for("", str(srt)), data, str(srt)) is None

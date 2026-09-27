@@ -5,6 +5,7 @@ empty placeholder, which only makes the media player report an error.
 """
 import json
 import os
+import shutil
 
 import pytest
 
@@ -183,3 +184,46 @@ def test_character_names_with_commas_are_rejected(qapp, answers, media):
     assert [c["name"] for c in window.characters] == names_before
     assert any(kind == "warning" for kind, _ in answers["shown"])
     _close(window)
+
+
+def test_autosave_copied_from_another_project_is_not_offered(qapp, answers, media, monkeypatch):
+    original = _saved_project(media)
+    window = _open(original)
+    _code_current_line(window)
+    window.autosave_annotations()
+    window.is_dirty = False
+    window.deleteLater()
+    # Copy the project folder, hidden autosave included, then open the copy.
+    copy_dir = media.parent / "copied_project"
+    shutil.copytree(media, copy_dir)
+    copy_vat = copy_dir / "study.vat"
+    os.utime(copy_vat, (1000, 1000))
+    offered = []
+    answers["question"] = QMessageBox.Yes
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: offered.append(a[2]) or QMessageBox.Yes))
+
+    copied = _open(copy_vat)
+    requested = []
+    copied.request_open_project.connect(requested.append)
+    copied.try_restore_autosave()
+
+    assert offered == [] and requested == []
+    copied.is_dirty = False
+    _close(copied)
+
+
+def test_opening_a_mismatched_autosave_never_targets_the_other_project(qapp, answers, media):
+    original = _saved_project(media)
+    window = _open(original)
+    _code_current_line(window)
+    window.autosave_annotations()
+    window.is_dirty = False
+    window.deleteLater()
+    copy_dir = media.parent / "copied_project2"
+    shutil.copytree(media, copy_dir)
+
+    recovered = _open(copy_dir / ".study.vat.autosave.vat")
+
+    assert recovered.vat_file == ""  # unsaved: Save asks where, instead of writing the original
+    recovered.is_dirty = False
+    _close(recovered)
