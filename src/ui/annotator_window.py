@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtCore import Qt, QUrl, Slot, Signal, QEvent, QTimer
+from PySide6.QtCore import Qt, QUrl, Slot, Signal, QEvent, QTimer, QSignalBlocker
 from PySide6.QtGui import QAction, QColor, QKeySequence
 
 from src.core.app_settings import AppSettings
@@ -316,6 +316,8 @@ class VideoAnnotator(QMainWindow):
         subtitle_panel.setLayout(subtitle_panel_layout)
 
         self.setup_subtitle_list()
+        self.subtitle_list.itemClicked.connect(self.on_subtitle_clicked)
+        self.subtitle_list.itemChanged.connect(self.on_subtitle_item_changed)
 
         # Main Splitter (Top vs Bottom)
         main_splitter = QSplitter(Qt.Vertical)
@@ -667,8 +669,6 @@ class VideoAnnotator(QMainWindow):
         for j in range(len(self.custom_columns)):
             self.subtitle_list.setColumnWidth(7 + j, 220)
             
-        self.subtitle_list.itemClicked.connect(self.on_subtitle_clicked)
-        self.subtitle_list.itemChanged.connect(self.on_subtitle_item_changed)
         self.apply_subtitle_filters()
 
     def _make_readonly_item(self, text):
@@ -1228,6 +1228,8 @@ class VideoAnnotator(QMainWindow):
             self.import_csv(load_path)
 
     def import_csv(self, file_path):
+        # Replacing items must not invoke edit callbacks with deleted Qt items.
+        signal_blocker = QSignalBlocker(self.subtitle_list)
         try:
             with open(file_path, 'r', newline='', encoding='utf-8-sig') as csvfile:
                 reader = csv.DictReader(csvfile)
@@ -1282,6 +1284,8 @@ class VideoAnnotator(QMainWindow):
             QMessageBox.information(self, "Success", f"Annotations loaded from {file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load annotations: {e}")
+        finally:
+            signal_blocker.unblock()
 
     def update_progress_status(self):
         total = len(self.subtitles)

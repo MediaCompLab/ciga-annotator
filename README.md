@@ -30,6 +30,8 @@
 - **Unsaved-change protection:** Save/discard/cancel prompt when closing. Choosing not to save discards the changes and the recovery file.
 - **Safer writes:** Manual save and autosave use atomic write replacement to reduce data corruption risk.
 - **CSV import/export:** Save and load annotation progress in UTF-8 BOM CSV.
+  Repeated imports preserve a single set of table edit handlers, and bulk updates
+  do not trigger edit callbacks while cells are being replaced.
   Exports include a numeric `position` column containing the original subtitle order
   (starting at 1), alongside the existing subtitle time strings and role columns.
   CIGA GUI can select these columns automatically; skipped uncoded subtitles retain

@@ -258,3 +258,39 @@ def test_empty_csv_export_keeps_the_same_schema(qapp, answers, media):
         assert reader.fieldnames == ['line', 'position', 'start_time', 'end_time', 'speakers', 'listeners', 'targets', 'Note']
         assert list(reader) == []
     _close(window)
+
+
+def test_repeated_csv_import_does_not_duplicate_edit_callbacks(qapp, answers, media, monkeypatch):
+    edits = []
+    original = VideoAnnotator.on_subtitle_item_changed
+
+    def record_edit(self, item):
+        if not self._updating_table and item.column() >= 7:
+            edits.append((item.row(), item.column()))
+        return original(self, item)
+
+    monkeypatch.setattr(VideoAnnotator, 'on_subtitle_item_changed', record_edit)
+    window = _open(media=media)
+    path = media / 'annotations.csv'
+    window.annotations = {1: {'speakers': ['Sheldon'], 'listeners': ['Penny'], 'Note': 'greeting'}}
+    window.export_csv(str(path))
+    window.import_csv(str(path))
+    window.import_csv(str(path))
+    assert edits == []
+    assert not window.subtitle_list.signalsBlocked()
+    window.subtitle_list.item(1, 7).setText('updated')
+    assert edits == [(1, 7)]
+    assert window.annotations[1]['Note'] == 'updated'
+    assert window.annotations[1]['note'] == 'updated'
+    window.is_dirty = False
+    _close(window)
+
+
+def test_failed_csv_import_restores_table_edit_signals(qapp, answers, media):
+    window = _open(media=media)
+    window.import_csv(str(media / 'missing.csv'))
+    assert not window.subtitle_list.signalsBlocked()
+    window.subtitle_list.item(0, 7).setText('still editable')
+    assert window.annotations[0]['Note'] == 'still editable'
+    window.is_dirty = False
+    _close(window)
