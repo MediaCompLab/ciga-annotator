@@ -4,6 +4,7 @@ Dialogs are replaced with scripted answers so nothing blocks; the video file is 
 empty placeholder, which only makes the media player report an error.
 """
 import json
+import csv
 import os
 import shutil
 
@@ -227,3 +228,33 @@ def test_opening_a_mismatched_autosave_never_targets_the_other_project(qapp, ans
     assert recovered.vat_file == ""  # unsaved: Save asks where, instead of writing the original
     recovered.is_dirty = False
     _close(recovered)
+
+
+def test_csv_export_has_original_numeric_subtitle_position_and_round_trips(qapp, answers, media):
+    window = _open(media=media)
+    window.annotations = {1: {'speakers': ['Sheldon'], 'listeners': ['Penny'], 'targets': ['Penny'], 'Note': 'greeting'}}
+    path = media / 'annotations.csv'
+    window.export_csv(str(path))
+    with path.open(encoding='utf-8-sig', newline='') as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]['position'] == '2'
+    assert rows[0]['start_time'] == '00:00:03,000'
+    window.import_csv(str(path))
+    assert 'position' not in window.custom_columns
+    assert window.annotations[1]['speakers'] == ['Sheldon']
+    assert window.annotations[1]['listeners'] == ['Penny']
+    assert window.annotations[1]['Note'] == 'greeting'
+    window.is_dirty = False
+    _close(window)
+
+
+def test_empty_csv_export_keeps_the_same_schema(qapp, answers, media):
+    window = _open(media=media)
+    path = media / 'empty.csv'
+    window.export_csv(str(path))
+    with path.open(encoding='utf-8-sig', newline='') as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames == ['line', 'position', 'start_time', 'end_time', 'speakers', 'listeners', 'targets', 'Note']
+        assert list(reader) == []
+    _close(window)

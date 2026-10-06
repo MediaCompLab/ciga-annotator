@@ -30,6 +30,10 @@
 - **Unsaved-change protection:** Save/discard/cancel prompt when closing. Choosing not to save discards the changes and the recovery file.
 - **Safer writes:** Manual save and autosave use atomic write replacement to reduce data corruption risk.
 - **CSV import/export:** Save and load annotation progress in UTF-8 BOM CSV.
+  Exports include a numeric `position` column containing the original subtitle order
+  (starting at 1), alongside the existing subtitle time strings and role columns.
+  CIGA GUI can select these columns automatically; skipped uncoded subtitles retain
+  gaps in their position values. CSV import accepts both older exports and this schema.
 
 **Screen shot**
 ![screenshot](./screenshot.png)
@@ -97,6 +101,11 @@ python -m pytest
 ```
 
 To build the Windows executable: `python build.py`.
+The executable is written to `dist/CIGA-Annotator.exe`; `dist/build-info.json`
+records the CSV schema and Python/Qt versions used by the build.
+Both applications' build scripts isolate DLL discovery from unrelated PATH tools
+such as Conda or Poppler. Qt hooks collect the modules and multimedia plugins used
+by the annotator.
 
 ## Contributing
 

@@ -1192,6 +1192,7 @@ class VideoAnnotator(QMainWindow):
                 
                 row_data = {
                     'line': sub['text'],
+                    'position': i + 1,
                     'start_time': milliseconds_to_srt_time(sub['start_time']),
                     'end_time': milliseconds_to_srt_time(sub['end_time']),
                     'speakers': spk,
@@ -1200,6 +1201,8 @@ class VideoAnnotator(QMainWindow):
                 }
                 
                 for c in getattr(self, 'custom_columns', ['Note']):
+                    if c == 'position':
+                        continue  # Reserved numeric subtitle order for CIGA.
                     val = ann.get(c, "")
                     if not val and c == "Note":
                         val = ann.get('note', '')
@@ -1210,10 +1213,8 @@ class VideoAnnotator(QMainWindow):
                 if spk or lst or tgt or has_custom:
                     rows.append(row_data)
 
-            if rows:
-                fieldnames = ['line', 'start_time', 'end_time', 'speakers', 'listeners', 'targets'] + getattr(self, 'custom_columns', ['Note'])
-            else:
-                fieldnames = None
+            fieldnames = ['line', 'position', 'start_time', 'end_time', 'speakers', 'listeners', 'targets']
+            fieldnames += [c for c in getattr(self, 'custom_columns', ['Note']) if c != 'position']
             write_rows_to_csv_atomic(file_path, rows, fieldnames=fieldnames)
             self.is_dirty = False
             self.update_progress_status()
@@ -1233,7 +1234,7 @@ class VideoAnnotator(QMainWindow):
                 loaded_data = list(reader)
                 if loaded_data:
                     # Capture any new custom columns from the CSV
-                    base_fields = {'line', 'start_time', 'end_time', 'speakers', 'listeners', 'targets'}
+                    base_fields = {'line', 'position', 'start_time', 'end_time', 'speakers', 'listeners', 'targets'}
                     csv_fields = set(reader.fieldnames) if reader.fieldnames else set(loaded_data[0].keys())
                     new_cols = [f for f in csv_fields if f not in base_fields and f not in self.custom_columns and f != 'note']
                     if new_cols:
