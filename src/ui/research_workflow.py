@@ -5,12 +5,12 @@ import hashlib
 from PySide6.QtCore import Qt, QSignalBlocker
 from PySide6.QtWidgets import (QHBoxLayout, QPushButton, QCheckBox, QLabel,
                               QListWidget, QListWidgetItem, QComboBox, QMessageBox,
-                              QFileDialog, QInputDialog, QApplication, QProgressDialog)
+                              QFileDialog, QInputDialog, QApplication, QProgressDialog, QTextEdit)
 from src.core.project import read_project_file
 from src.core.research import (ROLES, ROLE_LABELS, STATES, CodingHistory,
                                study_settings, material_identity, ensure_character_ids,
                                normalize_annotation, missing_roles, review_state, now,
-                               compare_projects)
+                               compare_projects, coding_started, is_uncoded, review_feedback, unit_progress)
 from src.ui.research_dialogs import ResearchSettingsDialog, ComparisonDialog, ProjectHistoryDialog
 
 
@@ -45,6 +45,9 @@ class ResearchWorkflow:
         self.history = CodingHistory()
         self.last_autosave = ''
         self._note_audit_coalesce = False
+        self._progress_counts = None
+        self._progress_annotations = None
+        self._progress_size = 0
         if self.vat_file and project_data.get('schema_version', 1) < 2:
             self.is_dirty = True
 
@@ -87,12 +90,22 @@ class ResearchWorkflow:
         layout.addLayout(na_bar)
 
     def add_review_controls(self, layout):
+        title = QLabel('Manual review · after coding')
+        title.setStyleSheet('font-weight: bold;')
+        layout.addWidget(title)
+        guidance = QLabel('Review each unit against the video and your codebook. Missing roles and inherited values are shown in the subtitle list; they never block coding.')
+        guidance.setWordWrap(True)
+        layout.addWidget(guidance)
+        self.review_summary = QTextEdit()
+        self.review_summary.setReadOnly(True)
+        self.review_summary.setMaximumHeight(260)
+        layout.addWidget(self.review_summary)
         self.review_label = QLabel()
         self.review_label.setWordWrap(True)
         self.review_label.setTextFormat(Qt.PlainText)
         layout.addWidget(self.review_label)
         bar = QHBoxLayout()
-        self.confirm_btn = QPushButton('Confirm && next')
+        self.confirm_btn = QPushButton('Mark reviewed && next')
         self.confirm_btn.clicked.connect(self.confirm_current)
         bar.addWidget(self.confirm_btn)
         review = QPushButton('Needs review')
@@ -102,16 +115,42 @@ class ResearchWorkflow:
         exclude.clicked.connect(self.exclude_current)
         bar.addWidget(exclude)
         layout.addLayout(bar)
-        self.project_rules_btn = QPushButton('Project coding rules…')
-        self.project_rules_btn.clicked.connect(self.show_research_settings)
-        layout.addWidget(self.project_rules_btn)
+        self.next_review_btn = QPushButton('Next unreviewed unit')
+        self.next_review_btn.clicked.connect(self.jump_to_next_review)
+        layout.addWidget(self.next_review_btn)
+        edit = QPushButton('Edit this unit in Current coding')
+        edit.clicked.connect(lambda: self.right_tabs.setCurrentIndex(0))
+        layout.addWidget(edit)
+        layout.addStretch()
+
+    def is_review_mode(self):
+        return (hasattr(self, 'right_tabs') and
+                self.right_tabs.currentWidget() is self.review_widget)
+
+    def on_workflow_tab_changed(self, *_):
+        if hasattr(self, 'confirm_review_action'):
+            self.confirm_review_action.setEnabled(self.is_review_mode())
+
+    def is_uncoded_unit(self, index):
+        return is_uncoded(self.annotations.get(index, {}), self.custom_columns)
+
+    def jump_to_next_review(self):
+        self.record_annotation(self.current_subtitle_index, clear_selections=False)
+        self.right_tabs.setCurrentWidget(self.review_widget)
+        total = len(self.subtitles)
+        for offset in range(1, total + 1):
+            index = (self.current_subtitle_index + offset) % total
+            if review_state(self.annotations.get(index, {})) not in ('confirmed', 'excluded'):
+                self.jump_to_subtitle(index, inherit=False)
+                return
+        self.statusBar().showMessage('Every unit has been reviewed or explicitly excluded.', 10000)
 
     def add_review_filter(self, bar):
         self.review_filter = QComboBox()
-        self.review_filter.addItem('All coding states', 'all')
-        self.review_filter.addItem('Unfinished', 'unfinished')
-        for state, label in STATES.items():
-            self.review_filter.addItem(label, state)
+        for label, value in [('All units', 'all'), ('Uncoded', 'pending'),
+                             ('Coded, not reviewed', 'unreviewed'), ('Needs check / review', 'attention'),
+                             ('Reviewed', 'confirmed'), ('Excluded', 'excluded')]:
+            self.review_filter.addItem(label, value)
         self.review_filter.currentIndexChanged.connect(self.apply_subtitle_filters)
         bar.addWidget(self.review_filter)
 
@@ -147,20 +186,24 @@ class ResearchWorkflow:
         self.role_definition.setText((definition[:170] + '…' if len(definition) > 170 else definition)
                                     or 'Choose characters or mark N/A. Configure definitions in Project rules.')
         self.role_definition.setToolTip(definition)
-        state = review_state(annotation)
         missing = missing_roles(annotation, self.study)
-        message = STATES[state]
-        if annotation.get('inherited_from'):
-            message += ' · Inherited suggestions: verify before confirming'
-        if state == 'excluded':
-            message += ' · ' + annotation.get('exclusion_reason', '')
-        elif missing:
-            message += ' · Still required: ' + ', '.join(ROLE_LABELS[role] for role in missing)
-        elif state != 'confirmed':
-            message += ' · Ready for explicit confirmation'
+        label, details, _ = review_feedback(annotation, self.study, self.custom_columns)
+        message = label + ('\n' + details if details else '')
+        if missing and not coding_started(annotation, self.custom_columns):
+            message += '\nTo mark reviewed: select or mark N/A for ' + ', '.join(ROLE_LABELS[role] for role in missing)
         self.review_label.setText(message)
+        lines = [f'Unit {self.current_subtitle_index + 1} of {len(self.subtitles)}', self.subtitles[self.current_subtitle_index]['text']]
+        for role in ROLES:
+            value = ', '.join(annotation.get(role, [])) or ('N/A' if role in annotation.get('not_applicable', []) else '—')
+            lines.append(f'{ROLE_LABELS[role]}: {value}')
+        for column in self.custom_columns:
+            value = annotation.get(column, annotation.get('note', '') if column == 'Note' else '')
+            if value:
+                lines.append(f'{column}: {value}')
+        self.review_summary.setPlainText('\n'.join(lines))
         self.confirm_btn.setEnabled(not missing)
-        self.confirm_btn.setToolTip('Select characters or N/A for every required role.' if missing else 'Confirm this unit under the project’s rules and move to the next unfinished unit.')
+        self.confirm_btn.setToolTip('Select characters or N/A for every required role before manual approval.' if missing else 'Mark reviewed under the project rules and move to the next unreviewed unit.')
+        self.next_review_btn.setToolTip(self.app_settings.get_hotkey('next_review'))
         self.project_rules_btn.setText('Project coding rules…')
         self.project_rules_btn.setToolTip(f"Coder: {self.study['coder_id'] or 'not set'}\nCodebook: {self.study['codebook_version'] or 'not set'}")
         if hasattr(self, 'undo_action'):
@@ -224,7 +267,16 @@ class ResearchWorkflow:
             after.pop('exclusion_reason', None)
         self.history.push(index, before, after, action, coalesce=(action == 'Edit note'))
         self.audit(action, index, before, after, **provenance)
+        if (self._progress_counts is not None and self._progress_annotations is self.annotations
+                and self._progress_size == len(self.annotations)):
+            old_counts = unit_progress(before, self.study, self.custom_columns)
+            new_counts = unit_progress(after, self.study, self.custom_columns)
+            self._progress_counts = [total - old + new for total, old, new in
+                                     zip(self._progress_counts, old_counts, new_counts)]
+        else:
+            self._progress_counts = None
         self.annotations[index] = after
+        self._progress_size = len(self.annotations)
         self.is_dirty = True
         self.refresh_subtitle_row(index)
         if refresh:
@@ -259,7 +311,7 @@ class ResearchWorkflow:
 
     def confirm_current(self):
         if self.set_review_state('confirmed'):
-            self.jump_to_next_uncoded()
+            self.jump_to_next_review()
 
     def exclude_current(self):
         reason, ok = QInputDialog.getText(self, 'Exclude coding unit', 'Reason for excluding this unit (kept in project):')
@@ -276,6 +328,7 @@ class ResearchWorkflow:
         after = study_settings(value)
         if before == after:
             return
+        self._progress_counts = None
         self.study = after
         self.audit('Change project rules', before=before, after=after)
         if any(before[key] != after[key] for key in ('required_roles', 'definitions', 'codebook_version')):
@@ -288,6 +341,8 @@ class ResearchWorkflow:
         # Undo patches made under previous rules cannot restore stale confirmations.
         self.history = CodingHistory()
         self.is_dirty = True
+        for index in range(len(self.subtitles)):
+            self.refresh_subtitle_row(index)
         self.sync_research_controls()
         self.apply_subtitle_filters()
         self.update_progress_status()
@@ -303,6 +358,7 @@ class ResearchWorkflow:
         if result is None:
             return
         index, restored, action = result
+        self._progress_counts = None
         before = deepcopy(self.annotations.get(index, {}))
         if restored:
             self.annotations[index] = restored
@@ -326,9 +382,9 @@ class ResearchWorkflow:
         self.record_annotation(self.current_subtitle_index, clear_selections=False)
         count = sum(review_state(annotation) == 'confirmed' for annotation in self.annotations.values())
         if not count:
-            QMessageBox.information(self, 'No confirmed coding', 'Confirm at least one unit before exporting for analysis.')
+            QMessageBox.information(self, 'No reviewed coding', 'Use Manual review to approve at least one unit before exporting reviewed coding for analysis.')
             return
-        path, _ = QFileDialog.getSaveFileName(self, f'Export {count} confirmed units', 'confirmed-coding.csv', 'CSV Files (*.csv)')
+        path, _ = QFileDialog.getSaveFileName(self, f'Export {count} reviewed units', 'reviewed-coding.csv', 'CSV Files (*.csv)')
         if path:
             self.export_csv(path, confirmed_only=True)
 

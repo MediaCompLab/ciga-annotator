@@ -461,12 +461,13 @@ def test_mouse_coding_and_configured_confirmation(coding_window):
     QTest.mouseClick(window.coding_characters.viewport(), Qt.LeftButton, pos=QPoint(rect.left() + 8, rect.center().y()))
     assert window.annotations[0]['listeners'] == ['Sheldon']
     assert window.is_dirty
-    assert window.get_annotation_status(0) == 'In progress'
+    assert window.get_annotation_status(0) == 'Needs check'
     assert not window.set_review_state('confirmed')
     window.apply_research_settings({'coder_id': 'coder-A', 'codebook_version': 'v1',
                                     'required_roles': ['speakers', 'listeners']})
     QTest.mouseClick(window.na_checks['speakers'], Qt.LeftButton)
     assert window.confirm_btn.isEnabled()
+    window.right_tabs.setCurrentWidget(window.review_widget)
     QTest.mouseClick(window.confirm_btn, Qt.LeftButton)
     assert window.annotations[0]['review_state'] == 'confirmed'
     assert window.annotations[0]['confirmation']['coder_id'] == 'coder-A'
@@ -713,3 +714,185 @@ def test_failed_import_with_ambiguous_character_names_preserves_registry(coding_
     assert not window.import_csv(str(path))
     assert window.characters == before
     assert window.annotations == annotations
+
+
+def test_original_keyboard_sequence_advances_without_review_or_extra_keys(coding_window):
+    window = coding_window
+    window.videoWidget.setFocus()
+    assert not window.confirm_btn.isVisible()
+    assert not window.review_label.isVisible()
+    # Original workflow: select a speaker, then Space at the subtitle boundary.
+    QTest.keyClick(window.videoWidget, Qt.Key_1, Qt.AltModifier)
+    assert window.get_annotation_status(0) == 'Needs check'  # Two required roles missing.
+    assert window.annotations[0]['review_state'] == 'in_progress'
+    window.paused_at_subtitle_end = True
+    QTest.keyClick(window.videoWidget, Qt.Key_Space)
+    assert window.current_subtitle_index == 1
+    assert window.right_tabs.currentIndex() == 0
+    QTest.keyClick(window.videoWidget, Qt.Key_2, Qt.AltModifier)
+    window.paused_at_subtitle_end = True
+    QTest.keyClick(window.videoWidget, Qt.Key_Space)
+    assert window.annotations[0]['speakers'] == ['Sheldon']
+    assert window.annotations[1]['speakers'] == ['Penny']
+    assert all('confirmation' not in annotation for annotation in window.annotations.values())
+    assert 'Coded 2/2' in window.progress_label.text()
+    assert 'Reviewed 0/2' in window.progress_label.text()
+    # N no longer loops through the written but unreviewed lines.
+    QTest.keyClick(window.videoWidget, Qt.Key_N)
+    assert window.current_subtitle_index == 1
+    assert 'No uncoded unit remains' in window.statusBar().currentMessage()
+
+
+def test_n_skips_written_and_flagged_units_and_finds_uncoded(qapp, answers, media):
+    (media / 'ep1.srt').write_text(SRT + '\n3\n00:00:05,000 --> 00:00:06,000\nThird\n', encoding='utf-8')
+    window = _open(media=media)
+    window.show()
+    qapp.installEventFilter(window)
+    try:
+        window.current_speakers = ['Sheldon']
+        window.record_annotation(0, False)
+        window.commit_annotation(1, {'speakers': ['Penny'], 'review_state': 'needs_review'}, invalidate=False)
+        window.videoWidget.setFocus()
+        QTest.keyClick(window.videoWidget, Qt.Key_N)
+        assert window.current_subtitle_index == 2
+        assert window.annotations[0]['review_state'] == 'in_progress'
+        assert window.annotations[1]['review_state'] == 'needs_review'
+    finally:
+        qapp.removeEventFilter(window)
+        window.is_dirty = False
+        _close(window)
+
+
+def test_manual_review_uses_separate_queue_and_preserves_mode_when_watching(coding_window):
+    window = coding_window
+    window.apply_research_settings({'required_roles': ['speakers']})
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, False)
+    window.commit_annotation(1, {'speakers': ['Penny']})
+    window.right_tabs.setCurrentWidget(window.review_widget)
+    assert window.confirm_btn.isVisible()
+    assert window.confirm_review_action.isEnabled()
+    assert 'Speaker: Sheldon' in window.review_summary.toPlainText()
+    QTest.mouseClick(window.videoWidget, Qt.LeftButton)
+    assert window.is_review_mode()
+    QTest.keyClick(window.videoWidget, Qt.Key_Return, Qt.ControlModifier)
+    assert window.annotations[0]['review_state'] == 'confirmed'
+    assert window.current_subtitle_index == 1  # Still coded, but waiting for review.
+    assert window.is_review_mode()
+    QTest.keyClick(window.videoWidget, Qt.Key_Return, Qt.ControlModifier)
+    assert window.annotations[1]['review_state'] == 'confirmed'
+    assert 'Reviewed 2/2' in window.progress_label.text()
+
+
+def test_manual_approval_shortcut_is_disabled_during_coding(coding_window):
+    window = coding_window
+    window.apply_research_settings({'required_roles': ['speakers']})
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, False)
+    assert not window.confirm_review_action.isEnabled()
+    window.videoWidget.setFocus()
+    QTest.keyClick(window.videoWidget, Qt.Key_Return, Qt.ControlModifier)
+    assert window.annotations[0]['review_state'] == 'in_progress'
+    assert window.current_subtitle_index == 0
+
+
+def test_review_queue_does_not_inherit_or_modify_uncoded_units(coding_window):
+    window = coding_window
+    window.current_listeners = ['Penny']
+    window.record_annotation(0, False)
+    window.app_settings.settings['inherit_listener'] = True
+    window.videoWidget.setFocus()
+    QTest.keyClick(window.videoWidget, Qt.Key_N, Qt.ControlModifier | Qt.ShiftModifier)
+    assert window.is_review_mode()
+    assert window.current_subtitle_index == 1
+    assert window.current_listeners == []
+    assert 1 not in window.annotations
+    assert not window.confirm_btn.isEnabled()
+
+
+def test_row_feedback_colors_all_columns_without_blocking_coding(coding_window):
+    from PySide6.QtGui import QColor
+    window = coding_window
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, False)
+    for column in range(window.subtitle_list.columnCount()):
+        assert window.subtitle_list.item(0, column).background().color() == QColor(255, 193, 7, 65)
+    assert 'Missing: Listener, Target' in window.subtitle_list.item(0, 3).toolTip()
+    window.apply_research_settings({'required_roles': ['speakers']})
+    assert window.get_annotation_status(0) == 'Unreviewed'
+    assert window.subtitle_list.item(0, 3).background().color() == QColor(40, 120, 220, 40)
+    assert window.set_review_state('confirmed')
+    assert window.subtitle_list.item(0, 3).background().color() == QColor(40, 167, 69, 50)
+    window._toggle_role_name('speakers', 'Penny')
+    window.record_annotation(0, False)
+    assert window.get_annotation_status(0) == 'Needs review'
+    assert window.subtitle_list.item(0, 3).background().color() == QColor(255, 193, 7, 65)
+
+
+def test_coding_and_review_filters_are_independent(coding_window):
+    window = coding_window
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, False)
+    window.review_filter.setCurrentIndex(window.review_filter.findData('attention'))
+    assert not window.subtitle_list.isRowHidden(0)
+    assert window.subtitle_list.isRowHidden(1)
+    window.review_filter.setCurrentIndex(0)
+    window.app_settings.settings['only_uncoded'] = True
+    window.apply_subtitle_filters()
+    assert window.subtitle_list.isRowHidden(0)
+    assert not window.subtitle_list.isRowHidden(1)
+
+
+def test_separate_progress_stays_correct_after_review_undo_rules_and_exclusion(coding_window):
+    window = coding_window
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, False)
+    assert 'Coded 1/2' in window.progress_label.text()
+    assert 'Check 1' in window.progress_label.text()
+    window.apply_research_settings({'required_roles': ['speakers']})
+    assert 'Check 0' in window.progress_label.text()
+    window.set_review_state('confirmed')
+    assert 'Reviewed 1/2' in window.progress_label.text()
+    window.undo_coding()
+    assert 'Reviewed 0/2' in window.progress_label.text()
+    window.redo_coding()
+    assert 'Reviewed 1/2' in window.progress_label.text()
+    window.set_review_state('excluded', 'Outside the research scope')
+    assert 'Coded 0/1' in window.progress_label.text()
+    assert 'Excluded 1' in window.progress_label.text()
+    window.undo_coding()
+    assert 'Coded 1/2' in window.progress_label.text()
+    assert 'Reviewed 1/2' in window.progress_label.text()
+    rules = deepcopy(window.study)
+    rules['required_roles'] = ['speakers', 'listeners']
+    window.apply_research_settings(rules)
+    assert 'Reviewed 0/2' in window.progress_label.text()
+    assert 'Check 1' in window.progress_label.text()
+
+
+def test_csv_replacement_updates_progress_even_when_annotation_count_is_unchanged(coding_window, media):
+    window = coding_window
+    window.apply_research_settings({'required_roles': ['speakers']})
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, False)
+    window.set_review_state('confirmed')
+    path = media / 'replace.csv'
+    with path.open('w', newline='', encoding='utf-8') as stream:
+        writer = csv.DictWriter(stream, fieldnames=['position', 'start_time', 'end_time', 'speakers'])
+        writer.writeheader()
+        writer.writerow({'position': 2, 'start_time': '00:00:03,000', 'end_time': '00:00:04,000', 'speakers': 'Penny'})
+    assert window.import_csv(str(path))
+    assert 'Coded 1/2' in window.progress_label.text()
+    assert 'Reviewed 0/2' in window.progress_label.text()
+    assert 'Check 0' in window.progress_label.text()
+
+
+def test_clearing_filters_reveals_rows_hidden_by_review_filter(coding_window):
+    window = coding_window
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, False)
+    window.review_filter.setCurrentIndex(window.review_filter.findData('attention'))
+    assert window.subtitle_list.isRowHidden(1)
+    window.clear_subtitle_filters()
+    assert not window.subtitle_list.isRowHidden(0)
+    assert not window.subtitle_list.isRowHidden(1)

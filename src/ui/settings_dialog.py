@@ -56,7 +56,8 @@ class SettingsDialog(QDialog):
         self.cb_inherit_target = QCheckBox("Inherit Target from previous line")
         self.cb_inherit_target.setChecked(self.app_settings.get("inherit_target", False))
         
-        self.cb_only_uncoded = QCheckBox("Only show unfinished units")
+        self.cb_only_uncoded = QCheckBox("Only show uncoded units")
+        self.cb_only_uncoded.setToolTip('Written but unreviewed coding is hidden; review has a separate queue.')
         self.cb_only_uncoded.setChecked(self.app_settings.get("only_uncoded", False))
         
         layout.addWidget(self.cb_auto_pause)
@@ -76,7 +77,9 @@ class SettingsDialog(QDialog):
         
         self.actions_map = {
             "play_pause": "Play / Pause",
-            "next_uncoded": "Next Unfinished Unit",
+            "next_uncoded": "Next Uncoded Unit",
+            "next_review": "Next Unit for Manual Review",
+            "confirm_review": "Mark Reviewed and Next (Review tab only)",
             "prev_subtitle": "Previous Subtitle",
             "next_subtitle": "Next Subtitle",
             "seek_back": "Seek Back",

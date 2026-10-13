@@ -11,8 +11,8 @@ from uuid import uuid4
 
 ROLES = ('speakers', 'listeners', 'targets')
 ROLE_LABELS = dict(zip(ROLES, ('Speaker', 'Listener', 'Target')))
-STATES = {'pending': 'Pending', 'in_progress': 'In progress',
-          'confirmed': 'Confirmed', 'needs_review': 'Needs review', 'excluded': 'Excluded'}
+STATES = {'pending': 'Uncoded', 'in_progress': 'Unreviewed',
+          'confirmed': 'Reviewed', 'needs_review': 'Needs review', 'excluded': 'Excluded'}
 
 
 def now():
@@ -68,6 +68,52 @@ def review_state(annotation):
     if any(annotation.get(role) for role in ROLES) or annotation.get('note') or annotation.get('Note'):
         return 'in_progress'
     return 'pending'
+
+
+def coding_started(annotation, custom_columns=('Note',)):
+    """Coding content and review approval are independent progress measures."""
+    return (any(annotation.get(role) for role in ROLES)
+            or bool(annotation.get('not_applicable'))
+            or bool(annotation.get('note'))
+            or any(str(annotation.get(column, '')).strip() for column in custom_columns))
+
+
+def is_uncoded(annotation, custom_columns=('Note',)):
+    return review_state(annotation) not in ('confirmed', 'excluded') and not coding_started(annotation, custom_columns)
+
+
+def review_feedback(annotation, study, custom_columns=('Note',)):
+    """Non-blocking row feedback; required roles gate manual approval only."""
+    state = review_state(annotation)
+    if state == 'excluded':
+        return 'Excluded', annotation.get('exclusion_reason', ''), 'excluded'
+    if state == 'confirmed':
+        return 'Reviewed', 'Manually reviewed under the project coding rules.', 'confirmed'
+    issues = []
+    if coding_started(annotation, custom_columns) or state == 'needs_review':
+        missing = missing_roles(annotation, study)
+        if missing:
+            issues.append('Missing: ' + ', '.join(ROLE_LABELS[role] for role in missing))
+        if annotation.get('inherited_from'):
+            issues.append('Inherited suggestions: verify during manual review.')
+    if state == 'needs_review':
+        return 'Needs review', '\n'.join(issues) or 'Flagged or changed since its previous review.', 'needs_review'
+    if issues:
+        return 'Needs check', '\n'.join(issues), 'needs_review'
+    if is_uncoded(annotation, custom_columns):
+        return 'Uncoded', 'No coding content recorded. Review is separate from coding.', 'pending'
+    return 'Unreviewed', 'Coding recorded. Review later; no confirmation is required to continue coding.', 'in_progress'
+
+
+def unit_progress(annotation, study, custom_columns=('Note',)):
+    """Counts used for incremental progress updates during keyboard coding."""
+    state = review_state(annotation)
+    if state == 'excluded':
+        return (0, 0, 0, 1)
+    started = coding_started(annotation, custom_columns)
+    attention = state == 'needs_review' or (state != 'confirmed' and started and
+                                           (missing_roles(annotation, study) or annotation.get('inherited_from')))
+    return (int(started or state == 'confirmed'), int(state == 'confirmed'), int(bool(attention)), 0)
 
 
 def normalize_annotation(annotation, characters):

@@ -10,13 +10,15 @@ from PySide6.QtWidgets import (
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtCore import Qt, QUrl, Slot, Signal, QEvent, QTimer, QSignalBlocker
-from PySide6.QtGui import QAction, QColor, QKeySequence
+from PySide6.QtGui import QAction, QColor, QKeySequence, QIcon, QPixmap, QPainter
 
 from src.core.app_settings import AppSettings
 from src.version import __version__
 from src.ui.settings_dialog import SettingsDialog
 from src.ui.research_workflow import ResearchWorkflow
-from src.core.research import ROLES, STATES, review_state, ensure_character_ids, now, normalize_annotation, missing_roles, CodingHistory
+from src.core.research import (ROLES, STATES, review_state, ensure_character_ids, now,
+                               normalize_annotation, missing_roles, CodingHistory,
+                               coding_started, review_feedback, unit_progress)
 from copy import deepcopy
 from src.core.parsers import parse_srt, milliseconds_to_srt_time
 from src.core.characters import get_base_dir, read_characters, save_characters, validate_character_name
@@ -275,13 +277,22 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
         
         coding_layout.addWidget(QLabel("Note:"))
         coding_layout.addWidget(self.note_edit)
-        self.add_review_controls(coding_layout)
+        self.project_rules_btn = QPushButton('Project coding rules…')
+        self.project_rules_btn.clicked.connect(self.show_research_settings)
+        coding_layout.addWidget(self.project_rules_btn)
+        coding_layout.addStretch()
         coding_widget = QWidget()
         coding_widget.setLayout(coding_layout)
+
+        self.review_widget = QWidget()
+        review_layout = QVBoxLayout(self.review_widget)
+        self.add_review_controls(review_layout)
 
         self.right_tabs = QTabWidget()
         self.right_tabs.addTab(coding_widget, 'Current coding')
         self.right_tabs.addTab(management_widget, 'Characters')
+        self.right_tabs.addTab(self.review_widget, 'Manual review')
+        self.right_tabs.currentChanged.connect(self.on_workflow_tab_changed)
         controls_widget = self.right_tabs
         controls_widget.setMinimumWidth(390)
 
@@ -325,7 +336,7 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
         self.add_column_btn.clicked.connect(self.add_custom_column)
         self.add_column_btn.setMaximumWidth(80)
         
-        self.next_uncoded_btn = QPushButton("Next Unfinished")
+        self.next_uncoded_btn = QPushButton("Next Uncoded")
         self.next_uncoded_btn.clicked.connect(self.jump_to_next_uncoded)
         self.next_uncoded_btn.setMaximumWidth(120)
         self.clear_filters_btn = QPushButton("Clear")
@@ -343,6 +354,9 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
         subtitle_panel_layout = QVBoxLayout()
         subtitle_panel_layout.addLayout(filter_bar)
         subtitle_panel_layout.addWidget(self.subtitle_list)
+        legend = QLabel('Row colors · Blue: unreviewed · Amber: needs check / review · Green: reviewed · Gray: excluded')
+        legend.setWordWrap(True)
+        subtitle_panel_layout.addWidget(legend)
         subtitle_panel.setLayout(subtitle_panel_layout)
 
         self.setup_subtitle_list()
@@ -447,7 +461,7 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
         export_csv_action = QAction("Export All Coding to CSV…", self)
         export_csv_action.triggered.connect(self.export_csv_dialog)
         file_menu.addAction(export_csv_action)
-        analysis_action = QAction("Export Confirmed Coding for Analysis…", self)
+        analysis_action = QAction("Export Reviewed Coding for Analysis…", self)
         analysis_action.triggered.connect(self.export_analysis_dialog)
         file_menu.addAction(analysis_action)
 
@@ -461,10 +475,19 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
         preferences_action.triggered.connect(self.show_preferences)
         file_menu.addAction(preferences_action)
 
-        self.next_uncoded_action = QAction("Jump to Next Unfinished", self)
+        self.next_uncoded_action = QAction("Jump to Next Uncoded", self)
         self.next_uncoded_action.setShortcut(self.app_settings.get_hotkey("next_uncoded"))
         self.next_uncoded_action.triggered.connect(self.jump_to_next_uncoded)
         tools_menu.addAction(self.next_uncoded_action)
+        self.next_review_action = QAction('Next Unit for Manual Review', self)
+        self.next_review_action.setShortcut(self.app_settings.get_hotkey('next_review'))
+        self.next_review_action.triggered.connect(self.jump_to_next_review)
+        tools_menu.addAction(self.next_review_action)
+        self.confirm_review_action = QAction('Mark Reviewed and Next (Manual review only)', self)
+        self.confirm_review_action.setShortcut(self.app_settings.get_hotkey('confirm_review'))
+        self.confirm_review_action.triggered.connect(self.confirm_current)
+        tools_menu.addAction(self.confirm_review_action)
+        self.on_workflow_tab_changed()
 
         self.shortcuts_help_action = QAction("Shortcuts", self)
         self.shortcuts_help_action.setShortcut(self.app_settings.get_hotkey("shortcuts_help"))
@@ -539,7 +562,7 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
         self.sync_research_controls()
         next_key = self.app_settings.get_hotkey('next_uncoded')
         self.hint_label.setText(
-            f"Active: {role_name} · Alt+[character key]: code · {next_key}: next unfinished · Ctrl+S: save project"
+            f"Active: {role_name} · Alt+[character key]: code · {next_key}: next uncoded · Ctrl+S: save project"
         )
 
         active_style = "font-weight: bold; color: #4DA6FF;" # Bright blue
@@ -790,6 +813,7 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
             QMessageBox.warning(self, 'Reserved column', 'Choose a unique name that is not a built-in coding field.')
             return
         self.custom_columns.append(name)
+        self._progress_counts = None
         with QSignalBlocker(self.subtitle_list):
             self.setup_subtitle_list()
         self.audit('Add custom column', after=name)
@@ -799,18 +823,36 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
     def apply_subtitle_filters(self):
         query = self.search_edit.text().strip().lower()
         only_uncoded = self.app_settings.get("only_uncoded", False)
+        selected = self.review_filter.currentData()
+        if not query and not only_uncoded and selected == 'all':
+            for row in getattr(self, '_hidden_subtitle_rows', set()):
+                if row < len(self.subtitles):
+                    self.subtitle_list.setRowHidden(row, False)
+            self._hidden_subtitle_rows = set()
+            return
+        hidden_rows = set()
         for i, sub in enumerate(self.subtitles):
-            status = self.get_annotation_status(i)
             match_text = query in sub['text'].lower() if query else True
-            state = review_state(self.annotations.get(i, {}))
-            match_coded = state not in ('confirmed', 'excluded') if only_uncoded else True
-            selected = self.review_filter.currentData()
-            match_review = (selected == 'all' or selected == state or
-                            (selected == 'unfinished' and state not in ('confirmed', 'excluded')))
+            annotation = self.annotations.get(i, {})
+            state = review_state(annotation)
+            match_coded = self.is_uncoded_unit(i) if only_uncoded else True
+            _, _, feedback = review_feedback(annotation, self.study, self.custom_columns)
+            match_review = (selected == 'all' or
+                            (selected == 'pending' and self.is_uncoded_unit(i)) or
+                            (selected == 'unreviewed' and coding_started(annotation, self.custom_columns)
+                             and state not in ('confirmed', 'excluded')) or
+                            (selected == 'attention' and feedback == 'needs_review') or
+                            (selected in ('confirmed', 'excluded') and state == selected))
             match_coded = match_coded and match_review
-            self.subtitle_list.setRowHidden(i, not (match_text and match_coded))
+            hidden = not (match_text and match_coded)
+            self.subtitle_list.setRowHidden(i, hidden)
+            if hidden:
+                hidden_rows.add(i)
+        self._hidden_subtitle_rows = hidden_rows
 
     def apply_inheritance_to_current(self):
+        if self.is_review_mode():
+            return
         if self.current_subtitle_index <= 0:
             return
         if self.current_subtitle_index in self.annotations:
@@ -925,7 +967,7 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
             self.mediaPlayer.play()
 
     def get_annotation_status(self, index):
-        return STATES[review_state(self.annotations.get(index, {}))]
+        return review_feedback(self.annotations.get(index, {}), self.study, self.custom_columns)[0]
 
     def refresh_subtitle_row(self, index):
         if index < 0 or index >= len(self.subtitles):
@@ -934,7 +976,7 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
         speakers = ann.get('speakers', [])
         listeners = ann.get('listeners', [])
         targets = ann.get('targets', [])
-        status = self.get_annotation_status(index)
+        status, details, feedback = review_feedback(ann, self.study, self.custom_columns)
 
         self._updating_table = True
         self.subtitle_list.setItem(index, 4, self._make_readonly_item(', '.join(speakers)))
@@ -948,17 +990,34 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
             self.subtitle_list.setItem(index, 7 + j, QTableWidgetItem(val))
 
         self.subtitle_list.setItem(index, 7 + len(self.custom_columns), self._make_readonly_item(status))
-        if status == "Confirmed":
-            status_color = QColor(40, 167, 69, 50)
-        elif status in ("In progress", "Needs review"):
-            status_color = QColor(255, 193, 7, 50)
-        else:
-            status_color = None
+        colors = {'confirmed': QColor(40, 167, 69, 50),
+                  'needs_review': QColor(255, 193, 7, 65),
+                  'in_progress': QColor(40, 120, 220, 40),
+                  'excluded': QColor(128, 128, 128, 35)}
+        status_color = colors.get(feedback)
+        if not hasattr(self, '_review_icons'):
+            self._review_icons = {}
+            for state, color in colors.items():
+                dot = QPixmap(12, 12)
+                dot.fill(Qt.transparent)
+                painter = QPainter(dot)
+                painter.setRenderHint(QPainter.Antialiasing)
+                painter.setPen(Qt.NoPen)
+                opaque = QColor(color)
+                opaque.setAlpha(255)
+                painter.setBrush(opaque)
+                painter.drawEllipse(1, 1, 10, 10)
+                painter.end()
+                self._review_icons[state] = QIcon(dot)
+        # The status dot remains visible even when selection masks the row tint.
+        if feedback in self._review_icons:
+            self.subtitle_list.item(index, 7 + len(self.custom_columns)).setIcon(self._review_icons[feedback])
 
         col_count = self.subtitle_list.columnCount()
         for col in range(col_count):
             if self.subtitle_list.item(index, col):
-                if col == 0 and status_color:
+                self.subtitle_list.item(index, col).setToolTip(status + ('\n' + details if details else ''))
+                if status_color:
                     self.subtitle_list.item(index, col).setBackground(status_color)
                 else:
                     self.subtitle_list.item(index, col).setData(Qt.BackgroundRole, None)
@@ -966,23 +1025,21 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
 
     def jump_to_next_uncoded(self):
         self.record_annotation(self.current_subtitle_index, clear_selections=False)
-        start = self.current_subtitle_index + 1
-        for i in range(start, len(self.subtitles)):
-            if self.get_annotation_status(i) not in ("Confirmed", "Excluded"):
-                self.record_annotation(self.current_subtitle_index, clear_selections=False)
-                self.jump_to_subtitle(i)
+        self.right_tabs.setCurrentIndex(0)
+        total = len(self.subtitles)
+        for offset in range(1, total + 1):
+            index = (self.current_subtitle_index + offset) % total
+            if self.is_uncoded_unit(index):
+                self.jump_to_subtitle(index)
                 return
-        for i in range(0, start):
-            if self.get_annotation_status(i) not in ("Confirmed", "Excluded"):
-                self.record_annotation(self.current_subtitle_index, clear_selections=False)
-                self.jump_to_subtitle(i)
-                return
-        self.statusBar().showMessage('Every unit is confirmed or explicitly excluded.', 10000)
+        self.statusBar().showMessage('No uncoded unit remains. Manual review is available in its separate tab.', 10000)
 
     def show_shortcuts_help(self):
         descriptions = {'play_pause': 'Play/pause', 'prev_subtitle': 'Previous unit',
                         'next_subtitle': 'Next unit', 'seek_back': 'Rewind 2 seconds',
-                        'seek_forward': 'Forward 2 seconds', 'next_uncoded': 'Next unfinished unit',
+                        'seek_forward': 'Forward 2 seconds', 'next_uncoded': 'Next uncoded unit',
+                        'next_review': 'Next unit for manual review',
+                        'confirm_review': 'Mark reviewed and next (Manual review tab only)',
                         'focus_search': 'Search', 'shortcuts_help': 'Help',
                         'role_speakers': 'Speaker', 'role_listeners': 'Listener',
                         'role_targets': 'Target', 'cycle_role': 'Cycle coding roles'}
@@ -999,6 +1056,8 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
             # Apply changes
             self.apply_subtitle_filters()
             self.next_uncoded_action.setShortcut(self.app_settings.get_hotkey("next_uncoded"))
+            self.next_review_action.setShortcut(self.app_settings.get_hotkey('next_review'))
+            self.confirm_review_action.setShortcut(self.app_settings.get_hotkey('confirm_review'))
             self.shortcuts_help_action.setShortcut(self.app_settings.get_hotkey("shortcuts_help"))
             self.update_active_role_ui()
 
@@ -1029,8 +1088,6 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
             self.current_listeners = []
             self.current_targets = []
         self.refresh_role_summary()
-        self.apply_subtitle_filters()
-        self.update_progress_status()
 
     def _is_hotkey(self, event, action_name):
         hotkey_str = self.app_settings.get_hotkey(action_name)
@@ -1043,7 +1100,8 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
         return seq.matches(QKeySequence(event_key_combination)) == QKeySequence.ExactMatch
 
     def eventFilter(self, source, event):
-        if event.type() == QEvent.FocusIn and source is getattr(self, 'videoWidget', None):
+        if (event.type() == QEvent.FocusIn and source is getattr(self, 'videoWidget', None)
+                and self.right_tabs.currentIndex() == 1):
             self.right_tabs.setCurrentIndex(0)
         if event.type() == QEvent.KeyPress:
             active_modal = QApplication.activeModalWidget()
@@ -1066,6 +1124,12 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
                 
             if self._is_hotkey(event, "next_uncoded"):
                 self.jump_to_next_uncoded()
+                return True
+            if self._is_hotkey(event, 'next_review'):
+                self.jump_to_next_review()
+                return True
+            if self.is_review_mode() and self._is_hotkey(event, 'confirm_review'):
+                self.confirm_current()
                 return True
             if self._is_hotkey(event, "play_pause"):
                 self.handle_spacebar()
@@ -1460,13 +1524,19 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
 
     def update_progress_status(self):
         total = len(self.subtitles)
-        counts = {state: 0 for state in STATES}
-        for annotation_index in range(total):
-            counts[review_state(self.annotations.get(annotation_index, {}))] += 1
+        if (self._progress_counts is None or self._progress_annotations is not self.annotations
+                or self._progress_size != len(self.annotations)):
+            self._progress_counts = [0, 0, 0, 0]
+            for annotation in self.annotations.values():
+                self._progress_counts = [total_count + value for total_count, value in
+                                         zip(self._progress_counts, unit_progress(annotation, self.study, self.custom_columns))]
+            self._progress_annotations = self.annotations
+            self._progress_size = len(self.annotations)
+        coded, reviewed, attention, excluded = self._progress_counts
         saved = 'Unsaved changes' if self.is_dirty else ('Project saved' if self.vat_file else 'Project not saved yet')
         recovery = f' · Recovery: {self.last_autosave}' if self.last_autosave else ''
         self.progress_label.setText(
-            f"Unit {self.current_subtitle_index + 1}/{total} · Confirmed {counts['confirmed']} · Review {counts['needs_review']} · In progress {counts['in_progress']} · Excluded {counts['excluded']} · {saved}{recovery}")
+            f"Unit {self.current_subtitle_index + 1}/{total} · Coded {coded}/{total - excluded} · Reviewed {reviewed}/{total - excluded} · Check {attention} · Excluded {excluded} · {saved}{recovery}")
         self.update_window_title()
         self.sync_research_controls()
 

@@ -1,7 +1,7 @@
 from copy import deepcopy
 import pytest
 from src.core.research import (CodingHistory, compare_projects, material_identity,
-                               missing_roles, review_state, study_settings)
+                               missing_roles, review_state, study_settings, is_uncoded, review_feedback)
 
 
 def test_legacy_filled_roles_are_not_human_confirmation():
@@ -63,3 +63,25 @@ def test_compare_includes_custom_coding_dimensions():
     left['annotations']['0']['Emotion'] = 'Positive'
     right['annotations']['0']['Emotion'] = 'Negative'
     assert len(compare_projects(left, right)) == 1
+
+
+@pytest.mark.parametrize('annotation', [
+    {'speakers': ['A']}, {'not_applicable': ['listeners']}, {'note': 'check gaze'},
+    {'Emotion': 'positive'}, {'review_state': 'confirmed'}, {'review_state': 'excluded'},
+    {'review_state': 'needs_review', 'speakers': ['A']},
+])
+def test_coding_navigation_does_not_require_manual_approval(annotation):
+    assert not is_uncoded(annotation, ['Note', 'Emotion'])
+
+
+def test_cleared_coding_is_uncoded_even_if_previously_started():
+    assert is_uncoded({'review_state': 'in_progress', 'speakers': [], 'Note': ''})
+
+
+def test_missing_roles_are_passive_feedback_and_do_not_change_review_state():
+    annotation = {'speakers': ['A'], 'review_state': 'in_progress'}
+    label, details, feedback = review_feedback(annotation, study_settings())
+    assert label == 'Needs check'
+    assert 'Listener' in details and 'Target' in details
+    assert feedback == 'needs_review'
+    assert annotation['review_state'] == 'in_progress'

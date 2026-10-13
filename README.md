@@ -7,12 +7,12 @@
 ## Features
 
 - **Aegisub-like layout:** Video + coding panel on top, clickable subtitle list at the bottom.
-- **Task-focused right panel:** Current coding and character management have separate tabs. Click the video to return to coding.
+- **Task-focused right panel:** Current coding, character management and Manual review have separate tabs. Click the video to return to coding.
 - **Three-way coding:** Code Speaker, Listener, and Target per subtitle line.
 - **Keyboard-first workflow:**
    - `Space`: play/pause and continue line-by-line
    - `Up` / `Down`: previous / next subtitle line
-   - `N`: jump to next unfinished subtitle unit
+   - `N`: jump to next uncoded subtitle unit; written but unreviewed units are skipped
    - `Left` / `Right`: rewind/forward 2 seconds
    - `Ctrl+F`: focus subtitle search box
    - `F1`: open shortcut help
@@ -20,11 +20,14 @@
    - `Ctrl+Q`: cycle active coding role
    - `Alt + key`: toggle character in active coding role
    - `Ctrl+N`: edit the blank Name cell to add a character
+   - `Ctrl+Shift+N`: open Manual review and find the next unreviewed unit
+   - `Ctrl+Return`: mark reviewed and next, available only in Manual review
 - **Mouse coding:** Click Speaker/Listener/Target, then check characters. Use explicit N/A when a role does not apply.
 - **Character management:** Add, rename and delete controls; immutable identities survive renaming. Referenced characters cannot be deleted.
 - **Clickable subtitle list:** Click any row to jump to that line and restore its coding state.
-- **Subtitle filtering:** Search subtitle text or filter Pending, In progress, Confirmed, Needs review, and Excluded units.
-- **Explicit confirmation:** Filling roles does not confirm a unit. Configure required roles and study definitions in Project coding rules, then use Confirm & next. Coding edits or rule changes require review again.
+- **Passive review feedback:** Whole subtitle rows show Uncoded, Unreviewed, Needs check/review, Reviewed or Excluded, using colors plus text and a status dot. Missing roles and inherited values never interrupt coding.
+- **Separate manual review:** Code continuously with the existing shortcuts and Space advance, then inspect units in Manual review. Required-role and N/A rules are checked only when marking a unit reviewed. Coding edits or rule changes require review again.
+- **Separate progress:** Coded and Reviewed counts are independent; recording coding does not imply validation. Only reviewed units enter the reviewed analysis export.
 - **Research records:** Project-local coder ID, codebook version, material/unit identities and timestamped coding history.
 - **Coding undo/redo:** Undo selections, notes, N/A, review states and adjudication.
 - **Independent coder comparison:** Verify matching subtitle and video content and rules, inspect differences, and record an explicit resolution.
@@ -106,9 +109,9 @@ See [the research workflow and migration guide](docs/research-workflow.md) for c
 1. Use `Up` / `Down` to move between subtitle lines.
 2. Click a role button, or use `Ctrl+1/2/3` / `Ctrl+Q`.
 3. Check characters or use `Alt + character key`; mark N/A for inapplicable roles.
-4. Use Confirm & next after checking the unit, or mark Needs review / Exclude with a reason.
+4. Press Space at the subtitle boundary to continue; missing roles and review status do not block navigation. Review colors remain visible in the subtitle list.
 5. Inheritance offers visible, unconfirmed Listener/Target suggestions. Verify them before confirming.
-6. Use `N` / Next Unfinished to find remaining work. Save the project with Ctrl+S; CSV export does not save it.
+6. Use `N` / Next Uncoded to find untouched units. After coding, open Manual review and inspect units with Mark reviewed & next or Ctrl+Return. Save with Ctrl+S; CSV export does not save the project.
 
 ## Development
 

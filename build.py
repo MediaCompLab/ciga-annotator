@@ -50,7 +50,7 @@ if not exe_path.exists():
     'application': 'CIGA-Annotator',
     'application_version': __version__,
     'project_schema_version': 2,
-    'research_workflow': 'configurable completion, explicit confirmation, N/A, undo and coder comparison',
+    'research_workflow': 'continuous coding, separate manual review, passive row feedback, undo and coder comparison',
     'csv_schema': 'line,position,start_time,end_time,speakers,listeners,targets,custom columns',
     'python_version': sys.version.split()[0],
     'pyside6_version': version('PySide6'),

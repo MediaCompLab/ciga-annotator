@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1 — 2026-10-13
+
+- Separate continuous keyboard coding from Manual review. Missing roles, N/A resolution and review approval never block Space/Up/Down navigation.
+- Restore N / Next Uncoded to skipping written but unreviewed/flagged units. Add a separate review queue and Ctrl+Return approval available only in Manual review.
+- Show passive full-row colors, text, issue tooltips and status dots for missing roles, inherited values and review state. Track Coded and Reviewed progress separately.
+- Update only the changed unit’s progress and skip unnecessary filter scans during normal coding, improving keyboard response on large subtitle files.
+- Preserve project schema version 2, old CSV reading, manual approval rules and reviewed-only analysis exports.
+
 ## 1.1.0 — 2026-10-13
 
 - Protect keyboard coding and notes with immediate dirty state, row feedback and recovery saves; CSV export no longer clears unsaved project changes.

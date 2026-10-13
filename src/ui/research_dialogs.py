@@ -13,7 +13,7 @@ class ResearchSettingsDialog(QDialog):
         self.setWindowTitle('Project coding rules')
         self.resize(550, 400)
         layout = QVBoxLayout(self)
-        explanation = QLabel('These rules belong to this project. Confirmation requires a selection or explicit N/A for each required role. Changing the codebook or rules sends confirmed units back for review.')
+        explanation = QLabel('These rules belong to this project. Missing roles never block coding. Manual review approval requires a selection or explicit N/A for each required role. Changing the codebook or rules sends reviewed units back for review.')
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         form = QFormLayout()
@@ -96,7 +96,7 @@ class ComparisonDialog(QDialog):
         self.coder = coder
         self.owner = parent
         layout = QVBoxLayout(self)
-        info = QLabel(f'Other coder: {coder or "not set"} — {source}\nResolve each difference explicitly. Resolved units remain “Needs review” until you confirm them.')
+        info = QLabel(f'Other coder: {coder or "not set"} — {source}\nResolve each difference explicitly. Resolved units remain “Needs review” until you approve them in Manual review.')
         info.setWordWrap(True)
         layout.addWidget(info)
         self.table = QTableWidget(len(differences), 4)

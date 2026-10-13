@@ -20,6 +20,8 @@ DEFAULT_SETTINGS = {
     "hotkeys": {
         "play_pause": "Space",
         "next_uncoded": "N",
+        "next_review": "Ctrl+Shift+N",
+        "confirm_review": "Ctrl+Return",
         "prev_subtitle": "Up",
         "next_subtitle": "Down",
         "seek_back": "Left",
