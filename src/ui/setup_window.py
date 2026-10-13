@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QFileDialog
 )
 from PySide6.QtCore import Signal
+from pathlib import Path
 
 class MainWindow(QMainWindow):
     start_annotation = Signal(str, str, str, str) # video_file, srt_file, char_file, vat_file
@@ -30,6 +31,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(QLabel("--- OR Create New Project ---"))
 
         video_layout = QHBoxLayout()
+        video_layout.addWidget(QLabel('Video'))
         self.video_path_edit = QLineEdit()
         self.video_path_edit.setPlaceholderText("Select Video File (*.mp4, ...)")
         self.video_browse_button = QPushButton("Browse")
@@ -39,6 +41,7 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(video_layout)
 
         srt_layout = QHBoxLayout()
+        srt_layout.addWidget(QLabel('Subtitles'))
         self.srt_path_edit = QLineEdit()
         self.srt_path_edit.setPlaceholderText("Select Subtitle File (*.srt)")
         self.srt_browse_button = QPushButton("Browse")
@@ -48,6 +51,7 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(srt_layout)
 
         char_layout = QHBoxLayout()
+        char_layout.addWidget(QLabel('Characters'))
         self.char_path_edit = QLineEdit()
         self.char_path_edit.setPlaceholderText("Character File (Optional)")
         self.char_browse_button = QPushButton("Browse")
@@ -60,6 +64,11 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_annotation_clicked)
         main_layout.addWidget(self.start_button)
+        self.validation_label = QLabel('Select an existing video and SRT file to start.')
+        self.validation_label.setWordWrap(True)
+        main_layout.addWidget(self.validation_label)
+        for edit in (self.video_path_edit, self.srt_path_edit, self.char_path_edit):
+            edit.textChanged.connect(self.check_start_condition)
 
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
@@ -85,13 +94,20 @@ class MainWindow(QMainWindow):
             self.char_path_edit.setText(char_file)
             
     def check_start_condition(self):
-        if self.video_file and self.srt_file:
-            self.start_button.setEnabled(True)
-        else:
-            self.start_button.setEnabled(False)
+        self.video_file = self.video_path_edit.text().strip().strip('"')
+        self.srt_file = self.srt_path_edit.text().strip().strip('"')
+        self.char_file = self.char_path_edit.text().strip().strip('"')
+        valid = (bool(self.video_file) and Path(self.video_file).is_file() and
+                 bool(self.srt_file) and Path(self.srt_file).is_file() and
+                 (not self.char_file or Path(self.char_file).is_file()))
+        self.start_button.setEnabled(valid)
+        self.validation_label.setText('Ready to start. Characters can be added while coding.' if valid
+                                      else 'Enter existing video and SRT files. If a character file is entered, it must also exist.')
 
     def start_annotation_clicked(self):
-        self.start_annotation.emit(self.video_file, self.srt_file, self.char_file, "")
+        self.check_start_condition()
+        if self.start_button.isEnabled():
+            self.start_annotation.emit(self.video_file, self.srt_file, self.char_file, "")
 
     def open_project_file(self):
         vat_file, _ = QFileDialog.getOpenFileName(self, "Open Project", "", "VAT Projects (*.vat)")

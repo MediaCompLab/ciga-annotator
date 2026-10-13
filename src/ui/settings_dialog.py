@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QCheckBox, QPushButton, QLabel, 
-    QTabWidget, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QKeySequenceEdit
+    QTabWidget, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QKeySequenceEdit, QMessageBox
 )
 from PySide6.QtGui import QKeySequence
 from PySide6.QtCore import Qt
@@ -56,7 +56,7 @@ class SettingsDialog(QDialog):
         self.cb_inherit_target = QCheckBox("Inherit Target from previous line")
         self.cb_inherit_target.setChecked(self.app_settings.get("inherit_target", False))
         
-        self.cb_only_uncoded = QCheckBox("Only show uncoded")
+        self.cb_only_uncoded = QCheckBox("Only show unfinished units")
         self.cb_only_uncoded.setChecked(self.app_settings.get("only_uncoded", False))
         
         layout.addWidget(self.cb_auto_pause)
@@ -76,7 +76,7 @@ class SettingsDialog(QDialog):
         
         self.actions_map = {
             "play_pause": "Play / Pause",
-            "next_uncoded": "Next Uncoded Line",
+            "next_uncoded": "Next Unfinished Unit",
             "prev_subtitle": "Previous Subtitle",
             "next_subtitle": "Next Subtitle",
             "seek_back": "Seek Back",
@@ -115,6 +115,18 @@ class SettingsDialog(QDialog):
             row += 1
 
     def save_settings(self):
+        used = {}
+        reserved = {'Ctrl+S', 'Ctrl+N', 'Ctrl+Z', 'Ctrl+Shift+Z'}
+        for code, edit in self.shortcut_edits.items():
+            sequence = edit.keySequence()
+            text = sequence.toString()
+            if not text:
+                continue
+            if sequence.count() != 1 or text in reserved or 'Alt+' in text or text in used:
+                QMessageBox.warning(self, 'Shortcut conflict',
+                                    f'{text} conflicts with another action, coding keys, or a built-in shortcut. Choose one unique key combination.')
+                return
+            used[text] = code
         self.app_settings.set("auto_pause", self.cb_auto_pause.isChecked())
         self.app_settings.set("inherit_listener", self.cb_inherit_listener.isChecked())
         self.app_settings.set("inherit_target", self.cb_inherit_target.isChecked())

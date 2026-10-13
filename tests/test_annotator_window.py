@@ -7,6 +7,7 @@ import json
 import csv
 import os
 import shutil
+from copy import deepcopy
 
 import pytest
 
@@ -333,6 +334,7 @@ def _edit_new_character(window):
 
 def test_focus_video_click_exits_character_table_and_restores_coding(coding_window):
     window = coding_window
+    window.right_tabs.setCurrentIndex(1)
     window.character_table.setCurrentCell(0, 0)
     window.character_table.setFocus()
     assert _character_focus(window)
@@ -394,3 +396,320 @@ def test_focus_writable_fields_keep_text_input(coding_window, field):
     assert window.current_subtitle_index == 0
     QTest.keyClick(editor, Qt.Key_1, Qt.AltModifier)
     assert window.current_speakers == []
+
+
+def test_real_keyboard_coding_marks_dirty_refreshes_row_and_autosaves(coding_window):
+    window = coding_window
+    window.videoWidget.setFocus()
+    QTest.keyClick(window.videoWidget, Qt.Key_1, Qt.AltModifier)
+    assert window.is_dirty
+    assert window.subtitle_list.item(0, 4).text() == 'Sheldon'
+    window.autosave_annotations()
+    recovery = json.loads(open(window.autosave_path, encoding='utf-8').read())
+    assert recovery['annotations']['0']['speakers'] == ['Sheldon']
+
+
+def test_note_panel_changes_mark_dirty_and_update_note_export(coding_window, media):
+    window = coding_window
+    window.note_edit.setText('original')
+    window.note_edit.setText('updated')
+    assert window.is_dirty
+    assert window.annotations[0]['Note'] == 'updated'
+    assert window.subtitle_list.item(0, 7).text() == 'updated'
+    path = media / 'notes.csv'
+    window.export_csv(str(path))
+    with path.open(encoding='utf-8-sig', newline='') as stream:
+        assert list(csv.DictReader(stream))[0]['Note'] == 'updated'
+    assert window.is_dirty
+
+
+def test_csv_export_preserves_unsaved_project_changes(qapp, answers, media):
+    vat = _saved_project(media)
+    window = _open(vat)
+    before = vat.read_bytes()
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, clear_selections=False)
+    window.export_csv(str(media / 'export.csv'))
+    assert window.is_dirty
+    assert vat.read_bytes() == before
+    window.is_dirty = False
+    _close(window)
+
+
+def test_character_rename_updates_all_roles_and_existing_units(qapp, answers, media):
+    window = _open(media=media)
+    window.annotations = {0: {'speakers': ['Sheldon'], 'listeners': ['Penny'], 'targets': ['Sheldon']},
+                          1: {'speakers': ['Penny'], 'listeners': ['Sheldon'], 'targets': []}}
+    window.current_speakers = ['Sheldon']
+    window.character_table.item(0, 0).setText('Sheldon Cooper')
+    assert window.annotations[0]['speakers'] == ['Sheldon Cooper']
+    assert window.annotations[0]['targets'] == ['Sheldon Cooper']
+    assert window.annotations[1]['listeners'] == ['Sheldon Cooper']
+    assert window.current_speakers == ['Sheldon Cooper']
+    assert window.subtitle_list.item(1, 5).text() == 'Sheldon Cooper'
+    window.is_dirty = False
+    _close(window)
+
+
+def test_mouse_coding_and_configured_confirmation(coding_window):
+    window = coding_window
+    QTest.mouseClick(window.role_buttons['listeners'], Qt.LeftButton)
+    assert window.active_role == 'listeners'
+    item = window.coding_characters.item(0)
+    rect = window.coding_characters.visualItemRect(item)
+    from PySide6.QtCore import QPoint
+    QTest.mouseClick(window.coding_characters.viewport(), Qt.LeftButton, pos=QPoint(rect.left() + 8, rect.center().y()))
+    assert window.annotations[0]['listeners'] == ['Sheldon']
+    assert window.is_dirty
+    assert window.get_annotation_status(0) == 'In progress'
+    assert not window.set_review_state('confirmed')
+    window.apply_research_settings({'coder_id': 'coder-A', 'codebook_version': 'v1',
+                                    'required_roles': ['speakers', 'listeners']})
+    QTest.mouseClick(window.na_checks['speakers'], Qt.LeftButton)
+    assert window.confirm_btn.isEnabled()
+    QTest.mouseClick(window.confirm_btn, Qt.LeftButton)
+    assert window.annotations[0]['review_state'] == 'confirmed'
+    assert window.annotations[0]['confirmation']['coder_id'] == 'coder-A'
+    assert window.current_subtitle_index == 1
+
+
+def test_coding_edit_reopens_confirmation_and_undo_restores_it(coding_window):
+    window = coding_window
+    window.apply_research_settings({'required_roles': ['speakers']})
+    window._toggle_role_name('speakers', 'Sheldon')
+    window.record_annotation(0, False)
+    assert window.set_review_state('confirmed')
+    window._toggle_role_name('speakers', 'Penny')
+    window.record_annotation(0, False)
+    assert window.annotations[0]['review_state'] == 'needs_review'
+    window.undo_coding()
+    assert window.annotations[0]['review_state'] == 'confirmed'
+    assert window.current_speakers == ['Sheldon']
+    window.redo_coding()
+    assert window.annotations[0]['review_state'] == 'needs_review'
+    assert window.current_speakers == ['Sheldon', 'Penny']
+    assert window.audit_log[-1]['action'].startswith('Redo')
+
+
+def test_rule_change_invalidates_confirmation_but_coder_change_does_not(coding_window):
+    window = coding_window
+    window.apply_research_settings({'required_roles': []})
+    assert window.set_review_state('confirmed')
+    study = deepcopy(window.study)
+    study['coder_id'] = 'B'
+    window.apply_research_settings(study)
+    assert window.annotations[0]['review_state'] == 'confirmed'
+    study['definitions']['listeners'] = 'Study-specific listener definition'
+    window.apply_research_settings(study)
+    assert window.annotations[0]['review_state'] == 'needs_review'
+    assert not window.history.undo_entries
+
+
+def test_full_csv_preserves_states_and_confirmed_export_excludes_review(coding_window, media):
+    window = coding_window
+    window.apply_research_settings({'required_roles': []})
+    window.set_not_applicable('speakers', True)
+    assert window.set_review_state('confirmed')
+    window.jump_to_subtitle(1)
+    window.set_review_state('needs_review')
+    analysis = media / 'analysis.csv'
+    window.export_csv(str(analysis), confirmed_only=True)
+    with analysis.open(encoding='utf-8-sig') as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1 and rows[0]['position'] == '1'
+    full = media / 'full.csv'
+    window.export_csv(str(full), include_metadata=True)
+    assert window.import_csv(str(full))
+    assert window.annotations[0]['review_state'] == 'confirmed'
+    assert window.annotations[0]['not_applicable'] == ['speakers']
+    assert window.annotations[1]['review_state'] == 'needs_review'
+    assert 'review_state' not in window.custom_columns
+
+
+def test_failed_csv_import_preserves_all_existing_coding(coding_window, media):
+    window = coding_window
+    window.note_edit.setText('Important observation')
+    before = deepcopy(window.annotations)
+    path = media / 'wrong.csv'
+    path.write_text('start_time,end_time,speakers\n00:10:00,000,00:10:01,000,Alice\n', encoding='utf-8')
+    assert not window.import_csv(str(path))
+    assert window.annotations == before
+    assert not window.subtitle_list.signalsBlocked()
+
+
+def test_character_identity_and_audit_survive_save_and_rename(qapp, answers, media):
+    window = _open(media=media)
+    identity = window.characters[0]['id']
+    template_before = (media / 'chars.txt').read_bytes()
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, False)
+    window.character_table.item(0, 0).setText('Sheldon Cooper')
+    assert window.characters[0]['id'] == identity
+    assert window.annotations[0]['speakers_ids'] == [identity]
+    assert (media / 'chars.txt').read_bytes() == template_before
+    vat = media / 'research.vat'
+    assert window._save_to(str(vat))
+    _close(window)
+    restored = _open(vat)
+    assert restored.characters[0]['id'] == identity
+    assert restored.characters[0]['aliases'] == ['Sheldon']
+    assert restored.annotations[0]['speakers'] == ['Sheldon Cooper']
+    assert any(event['action'] == 'Rename character' for event in restored.audit_log)
+    assert restored.material['unit_ids'][0]
+    _close(restored)
+
+
+def test_referenced_character_cannot_be_deleted(coding_window, answers):
+    window = coding_window
+    window.current_speakers = ['Sheldon']
+    window.record_annotation(0, False)
+    window.character_table.selectRow(0)
+    answers['question'] = QMessageBox.Yes
+    window.delete_selected_character()
+    assert window.characters[0]['name'] == 'Sheldon'
+    assert 'referenced by 1' in answers['shown'][-1][1]
+
+
+def test_pasted_setup_paths_are_used_and_invalid_path_disables_start(qapp, media):
+    from src.ui.setup_window import MainWindow
+    window = MainWindow()
+    emitted = []
+    window.start_annotation.connect(lambda *paths: emitted.append(paths))
+    window.video_path_edit.setText(str(media / 'ep1.mp4'))
+    window.srt_path_edit.setText(str(media / 'ep1.srt'))
+    assert window.start_button.isEnabled()
+    window.start_annotation_clicked()
+    assert emitted[0][:2] == (str(media / 'ep1.mp4'), str(media / 'ep1.srt'))
+    window.video_path_edit.clear()
+    assert not window.start_button.isEnabled()
+    window.close()
+
+
+def test_adjudication_records_other_coder_and_requires_confirmation(coding_window):
+    window = coding_window
+    window.resolve_comparison(0, {'speakers': ['Penny']}, 'coder-b.vat', 'B', True)
+    assert window.current_speakers == ['Penny']
+    assert window.annotations[0]['review_state'] == 'needs_review'
+    assert window.audit_log[-1]['source_coder'] == 'B'
+    assert window.audit_log[-1]['decision'] == 'use_other'
+    window.undo_coding()
+    assert not window.annotations.get(0)
+
+
+def test_end_of_last_subtitle_does_not_clear_coding(coding_window):
+    window = coding_window
+    window.jump_to_subtitle(1)
+    window.current_speakers = ['Penny']
+    window.record_annotation(1, False)
+    window.paused_at_subtitle_end = True
+    window.handle_spacebar()
+    window.record_annotation(1, False)
+    assert window.annotations[1]['speakers'] == ['Penny']
+    assert window.current_speakers == ['Penny']
+
+
+def test_inherited_suggestions_are_visible_and_can_be_undone(coding_window):
+    window = coding_window
+    window.current_listeners = ['Penny']
+    window.record_annotation(0, False)
+    window.app_settings.settings['inherit_listener'] = True
+    window.jump_to_subtitle(1)
+    assert window.annotations[1]['listeners'] == ['Penny']
+    assert window.annotations[1]['review_state'] == 'in_progress'
+    assert 'Inherited suggestions' in window.review_label.text()
+    window.undo_coding()
+    assert not window.annotations.get(1)
+    assert window.current_listeners == []
+
+
+def test_changed_material_is_rejected_without_writing_project(qapp, answers, media):
+    window = _open(media=media)
+    vat = media / 'research.vat'
+    window._save_to(str(vat))
+    _close(window)
+    original = vat.read_bytes()
+    (media / 'ep1.srt').write_text(SRT.replace('Hello', 'Changed'), encoding='utf-8')
+    rejected = _open(vat)
+    assert not rejected.ready
+    assert vat.read_bytes() == original
+    assert 'subtitles differ' in answers['shown'][-1][1]
+    assert rejected.close()
+
+
+def test_duplicate_character_name_is_rejected(coding_window, answers):
+    window = coding_window
+    window.character_table.item(0, 0).setText('Penny')
+    assert window.characters[0]['name'] == 'Sheldon'
+    assert 'already exists' in answers['shown'][-1][1]
+
+
+def test_material_and_history_dialog_shows_audit_entries(coding_window):
+    from src.ui.research_dialogs import ProjectHistoryDialog
+    from PySide6.QtWidgets import QTableWidget, QTextEdit
+    window = coding_window
+    window.current_speakers = ['Penny']
+    window.record_annotation(0, False)
+    dialog = ProjectHistoryDialog(window)
+    table = dialog.findChild(QTableWidget)
+    assert table.rowCount() == 1
+    table.setCurrentCell(0, 0)
+    assert 'Edit coding' in dialog.findChild(QTextEdit).toPlainText()
+    dialog.close()
+
+
+def test_compare_checks_actual_video_content_before_showing_differences(coding_window, media, monkeypatch, answers):
+    window = coding_window
+    other = deepcopy(window._project_data(str(media / 'other.vat')))
+    other['video_file'] = 'different.mp4'
+    (media / 'different.mp4').write_bytes(b'different video')
+    path = media / 'other.vat'
+    path.write_text(json.dumps(other), encoding='utf-8')
+    monkeypatch.setattr(QFileDialog, 'getOpenFileName', staticmethod(lambda *args: (str(path), '')))
+    before = deepcopy(window.annotations)
+    window.compare_project_dialog()
+    assert window.annotations == before
+    assert 'Video content differs' in answers['shown'][-1][1]
+
+
+def test_comparison_dialog_resolves_selected_difference(coding_window):
+    from src.ui.research_dialogs import ComparisonDialog
+    window = coding_window
+    dialog = ComparisonDialog(window, [(0, {}, {'speakers': ['Penny']})], 'b.vat', 'B')
+    dialog.resolve(True)
+    assert window.annotations[0]['speakers'] == ['Penny']
+    assert window.annotations[0]['review_state'] == 'needs_review'
+    assert dialog.table.rowCount() == 0
+    dialog.close()
+
+
+def test_customizable_hotkey_conflicts_are_blocked(qapp, tmp_path, monkeypatch):
+    from src.core.app_settings import AppSettings
+    from src.ui.settings_dialog import SettingsDialog
+    from PySide6.QtGui import QKeySequence
+    import src.core.app_settings as module
+    monkeypatch.setattr(module, 'SETTINGS_FILE', str(tmp_path / 'settings.json'))
+    settings = AppSettings()
+    dialog = SettingsDialog(None, settings)
+    dialog.shortcut_edits['next_uncoded'].setKeySequence(QKeySequence('Ctrl+S'))
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args: shown.append(args[2]))
+    dialog.save_settings()
+    assert shown
+    assert settings.get_hotkey('next_uncoded') == 'N'
+    assert not (tmp_path / 'settings.json').exists()
+    dialog.close()
+
+
+def test_failed_import_with_ambiguous_character_names_preserves_registry(coding_window, media):
+    window = coding_window
+    before = deepcopy(window.characters)
+    annotations = deepcopy(window.annotations)
+    path = media / 'ambiguous-names.csv'
+    with path.open('w', newline='', encoding='utf-8') as stream:
+        writer = csv.DictWriter(stream, fieldnames=['start_time', 'end_time', 'speakers'])
+        writer.writeheader()
+        writer.writerow({'start_time': '00:00:01,000', 'end_time': '00:00:02,000', 'speakers': 'New character'})
+        writer.writerow({'start_time': '00:00:03,000', 'end_time': '00:00:04,000', 'speakers': 'PENNY'})
+    assert not window.import_csv(str(path))
+    assert window.characters == before
+    assert window.annotations == annotations

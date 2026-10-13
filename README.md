@@ -1,18 +1,18 @@
 # CIGA Annotator
 
-**CIGA Annotator** is a subtitle-centric video annotation tool with an Aegisub-like layout and keyboard-first coding workflow, designed for annotating character interactions (Speaker, Listener, Target). 
+**CIGA Annotator** is a subtitle-centric video annotation tool with an Aegisub-like layout and mouse and keyboard coding workflow, designed for annotating character interactions (Speaker, Listener, Target).
 
 *This tool is part of the [CIGA (Character Interaction Graph Analysis)](https://github.com/MediaCompLab/ciga) project suite. The CSV exported from this annotator can be directly used in the CIGA library or [CIGA-GUI](https://github.com/MediaCompLab/ciga-gui).*
 
 ## Features
 
 - **Aegisub-like layout:** Video + coding panel on top, clickable subtitle list at the bottom.
-- **Split right panel:** Top area for character management, bottom area shows current Speaker/Listener/Target sets.
+- **Task-focused right panel:** Current coding and character management have separate tabs. Click the video to return to coding.
 - **Three-way coding:** Code Speaker, Listener, and Target per subtitle line.
 - **Keyboard-first workflow:**
    - `Space`: play/pause and continue line-by-line
    - `Up` / `Down`: previous / next subtitle line
-   - `N`: jump to next uncoded subtitle line
+   - `N`: jump to next unfinished subtitle unit
    - `Left` / `Right`: rewind/forward 2 seconds
    - `Ctrl+F`: focus subtitle search box
    - `F1`: open shortcut help
@@ -20,10 +20,14 @@
    - `Ctrl+Q`: cycle active coding role
    - `Alt + key`: toggle character in active coding role
    - `Ctrl+N`: edit the blank Name cell to add a character
-- **Dynamic character management:** Add/remove/edit character names and shortcut bindings during annotation.
+- **Mouse coding:** Click Speaker/Listener/Target, then check characters. Use explicit N/A when a role does not apply.
+- **Character management:** Add, rename and delete controls; immutable identities survive renaming. Referenced characters cannot be deleted.
 - **Clickable subtitle list:** Click any row to jump to that line and restore its coding state.
-- **Subtitle filtering:** Search subtitle text and optionally show only uncoded lines.
-- **Status tracking:** Each subtitle row is marked as `Uncoded`, `Partial`, or `Done`.
+- **Subtitle filtering:** Search subtitle text or filter Pending, In progress, Confirmed, Needs review, and Excluded units.
+- **Explicit confirmation:** Filling roles does not confirm a unit. Configure required roles and study definitions in Project coding rules, then use Confirm & next. Coding edits or rule changes require review again.
+- **Research records:** Project-local coder ID, codebook version, material/unit identities and timestamped coding history.
+- **Coding undo/redo:** Undo selections, notes, N/A, review states and adjudication.
+- **Independent coder comparison:** Verify matching subtitle and video content and rules, inspect differences, and record an explicit resolution.
 - **Editable Note column:** Fill per-line notes either from right panel Note input or directly in the table.
 - **Player controls:** Built-in play/pause button, timeline slider, and current/total time display.
 - **Coding template options:** Optional inheritance of Listener/Target from the previous line.
@@ -39,7 +43,9 @@
   gaps in their position values. CSV import accepts both older exports and this schema.
 
 **Screen shot**
-![screenshot](./screenshot.png)
+![Current coding workspace](docs/coding-workspace.png)
+
+Shown with synthetic subtitle material; video decoding is not part of this screenshot.
 
 ## Installation
 
@@ -73,14 +79,14 @@
    - `CharacterName,ShortcutKey`
 
    Character names cannot contain commas, because commas separate characters in the exported CSV
-   and in CIGA's input. Without a character file, the annotator keeps its list in `characters.txt`
-   next to the application.
+   and in CIGA's input. Character files are starting templates; edits are kept in the project
+   and do not overwrite a shared template. Use File → Export Character Template to reuse a list.
 
 3. **Start Annotation**  
    Click "Start Annotation" to begin. The player auto-pauses at subtitle boundaries for coding.
 
 4. **Manage Characters**
-   Double-click a Name or Key cell in the upper-right character table to edit it.
+   Open the Characters tab and use Add/Rename/Delete, or double-click a Name or Key cell.
    Press `Ctrl+N` to add a character in its blank Name row. Enter saves the name and
    continues to the next blank row. Click the video to finish editing and resume
    coding shortcuts; the character table will not take focus back. Clicking a
@@ -88,17 +94,21 @@
 
 5. **Save Progress**
    - Manual save: `Ctrl+S`
-   - Manual load: `Ctrl+O`
+   - Open an existing project: File → Open Project
    - Autosave is performed periodically and can be restored automatically.
+
+## Research coding workflow
+
+See [the research workflow and migration guide](docs/research-workflow.md) for completion rules, export choices, coder comparison and research record limits.
 
 ## Efficient Coding Workflow
 
 1. Use `Up` / `Down` to move between subtitle lines.
-2. Use `Ctrl+1/2/3` or `Ctrl+Q` to choose the active coding role.
-3. Use `Alt + character key` to toggle characters into the active role.
-4. Turn on `Only show uncoded` to focus on remaining lines.
-5. Use `Inherit Listener/Target from previous line` to reduce repeated coding in dialogue runs.
-6. Use `N` (or `Next Uncoded` button) to jump through remaining work quickly.
+2. Click a role button, or use `Ctrl+1/2/3` / `Ctrl+Q`.
+3. Check characters or use `Alt + character key`; mark N/A for inapplicable roles.
+4. Use Confirm & next after checking the unit, or mark Needs review / Exclude with a reason.
+5. Inheritance offers visible, unconfirmed Listener/Target suggestions. Verify them before confirming.
+6. Use `N` / Next Unfinished to find remaining work. Save the project with Ctrl+S; CSV export does not save it.
 
 ## Development
 

@@ -34,6 +34,7 @@ def main():
         if not annotator.close():
             return False
         app.removeEventFilter(annotator)
+        annotator.deleteLater()
         app.video_annotator = None
         return True
 
@@ -42,6 +43,11 @@ def main():
             return
 
         app.video_annotator = VideoAnnotator(video_file, srt_file, char_file, vat_file)
+        if not app.video_annotator.ready:
+            app.video_annotator.deleteLater()
+            app.video_annotator = None
+            app.main_window.show()
+            return
         # Hook up "New Project" signal from main window to reset
         app.video_annotator.request_new_project.connect(reset_to_main_window)
         app.video_annotator.request_open_project.connect(lambda f: start_annotation("", "", "", f))

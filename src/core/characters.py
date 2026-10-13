@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 def get_base_dir():
@@ -44,9 +45,13 @@ def read_characters(char_file):
 def save_characters(char_file, characters):
     if not char_file:
         char_file = str(get_base_dir() / "characters.txt")
-    with open(char_file, 'w', encoding='utf-8') as f:
-        for char in characters:
-            if char.get('key'):
-                f.write(f"{char['name']},{char['key']}\n")
-            else:
-                f.write(f"{char['name']}\n")
+    target = Path(char_file)
+    fd, temporary = tempfile.mkstemp(prefix=f'.{target.name}.', suffix='.tmp', dir=target.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            for char in characters:
+                f.write(char['name'] + (f",{char['key']}" if char.get('key') else '') + '\n')
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)

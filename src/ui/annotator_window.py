@@ -1,10 +1,11 @@
 import csv
+import json
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel,
     QFileDialog, QPushButton, QLineEdit, QHBoxLayout, QTableWidget,
     QTableWidgetItem, QMessageBox, QHeaderView,
-    QSplitter, QAbstractItemView, QSlider, QInputDialog
+    QSplitter, QAbstractItemView, QSlider, QInputDialog, QTabWidget
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -14,6 +15,9 @@ from PySide6.QtGui import QAction, QColor, QKeySequence
 from src.core.app_settings import AppSettings
 from src.version import __version__
 from src.ui.settings_dialog import SettingsDialog
+from src.ui.research_workflow import ResearchWorkflow
+from src.core.research import ROLES, STATES, review_state, ensure_character_ids, now, normalize_annotation, missing_roles, CodingHistory
+from copy import deepcopy
 from src.core.parsers import parse_srt, milliseconds_to_srt_time
 from src.core.characters import get_base_dir, read_characters, save_characters, validate_character_name
 from src.core.csv_utils import write_rows_to_csv_atomic
@@ -22,12 +26,13 @@ from src.core.project import (
     remove_file_quietly, write_project_file,
 )
 
-class VideoAnnotator(QMainWindow):
+class VideoAnnotator(ResearchWorkflow, QMainWindow):
     request_new_project = Signal()
     request_open_project = Signal(str)
 
     def __init__(self, video_file, srt_file, char_file, vat_file=""):
         super().__init__()
+        self.ready = False
         self.setWindowTitle("CIGA Annotator")
         
         self.app_settings = AppSettings()
@@ -40,6 +45,7 @@ class VideoAnnotator(QMainWindow):
         self._recovered_from_autosave = False
         self.annotations = {}
         self.custom_columns = ['Note']
+        project_data = {}
 
         if self.vat_file:
             # Load project details from .vat JSON
@@ -116,7 +122,6 @@ class VideoAnnotator(QMainWindow):
                     else:
                         project_data['char_file'] = ""
 
-                    write_project_file(self.vat_file, project_data)
                     self.is_dirty = True
 
                 if AUTOSAVE_OF_KEY in project_data:
@@ -131,7 +136,6 @@ class VideoAnnotator(QMainWindow):
                     self._recovered_from_autosave = True
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load project file: {e}")
-                QTimer.singleShot(0, self.request_new_project.emit)
                 return
         else:
             if not char_file:
@@ -147,7 +151,12 @@ class VideoAnnotator(QMainWindow):
         self.subtitles = parse_srt(self.srt_file)
         if not self.subtitles:
             QMessageBox.critical(self, "Error", "No subtitles found or failed to parse the SRT file.")
-            QTimer.singleShot(0, self.request_new_project.emit)
+            return
+
+        try:
+            self.init_research(project_data)
+        except (ValueError, TypeError, KeyError) as error:
+            QMessageBox.critical(self, 'Material mismatch', str(error))
             return
 
         self.current_speakers = []
@@ -172,12 +181,12 @@ class VideoAnnotator(QMainWindow):
         self.time_label.setMinimumWidth(110)
 
         # Media Player
-        self.mediaPlayer = QMediaPlayer()
+        self.mediaPlayer = QMediaPlayer(self)
 
         self.videoWidget = QVideoWidget()
         # Clicking the video ends character editing and restores coding hotkeys.
         self.videoWidget.setFocusPolicy(Qt.StrongFocus)
-        self.audioOutput = QAudioOutput()
+        self.audioOutput = QAudioOutput(self)
         self.mediaPlayer.setAudioOutput(self.audioOutput)
         self.mediaPlayer.setVideoOutput(self.videoWidget)
         self.mediaPlayer.setSource(QUrl.fromLocalFile(video_file))
@@ -228,46 +237,63 @@ class VideoAnnotator(QMainWindow):
         self.note_edit.textChanged.connect(self.on_note_text_changed)
 
         management_layout = QVBoxLayout()
+        self.add_character_controls(management_layout)
         management_layout.addWidget(self.character_table)
         management_widget = QWidget()
         management_widget.setLayout(management_layout)
 
         coding_layout = QVBoxLayout()
-        coding_layout.addWidget(QLabel("Active Coding Role (Ctrl+1/2/3/Q to switch):"))
-        coding_layout.addWidget(self.active_role_label)
+        coding_layout.setSpacing(4)
+        self.unit_label = QLabel()
+        self.unit_label.setStyleSheet("font-weight: bold;")
+        coding_layout.addWidget(self.unit_label)
+        self.study_label = QLabel()
+        self.study_label.setTextFormat(Qt.PlainText)
+        coding_layout.addWidget(self.study_label)
+        self.add_coding_controls(coding_layout)
         
         self.speaker_label = QLabel("Speaker:")
-        coding_layout.addWidget(self.speaker_label)
-        coding_layout.addWidget(self.speaker_summary)
+        speaker_row = QHBoxLayout()
+        self.speaker_label.setMinimumWidth(65)
+        speaker_row.addWidget(self.speaker_label)
+        speaker_row.addWidget(self.speaker_summary, 1)
+        coding_layout.addLayout(speaker_row)
         
         self.listener_label = QLabel("Listener:")
-        coding_layout.addWidget(self.listener_label)
-        coding_layout.addWidget(self.listener_summary)
+        listener_row = QHBoxLayout()
+        self.listener_label.setMinimumWidth(65)
+        listener_row.addWidget(self.listener_label)
+        listener_row.addWidget(self.listener_summary, 1)
+        coding_layout.addLayout(listener_row)
         
         self.target_label = QLabel("Target:")
-        coding_layout.addWidget(self.target_label)
-        coding_layout.addWidget(self.target_summary)
+        target_row = QHBoxLayout()
+        self.target_label.setMinimumWidth(65)
+        target_row.addWidget(self.target_label)
+        target_row.addWidget(self.target_summary, 1)
+        coding_layout.addLayout(target_row)
         
         coding_layout.addWidget(QLabel("Note:"))
         coding_layout.addWidget(self.note_edit)
+        self.add_review_controls(coding_layout)
         coding_widget = QWidget()
         coding_widget.setLayout(coding_layout)
 
-        right_splitter = QSplitter(Qt.Vertical)
-        right_splitter.addWidget(management_widget)
-        right_splitter.addWidget(coding_widget)
-        right_splitter.setStretchFactor(0, 3)
-        right_splitter.setStretchFactor(1, 2)
-
-        controls_widget = QWidget()
-        controls_outer_layout = QVBoxLayout()
-        controls_outer_layout.addWidget(right_splitter)
-        controls_widget.setLayout(controls_outer_layout)
-        controls_widget.setMinimumWidth(320)
+        self.right_tabs = QTabWidget()
+        self.right_tabs.addTab(coding_widget, 'Current coding')
+        self.right_tabs.addTab(management_widget, 'Characters')
+        controls_widget = self.right_tabs
+        controls_widget.setMinimumWidth(390)
 
         # Video Layout
         player_controls_layout = QHBoxLayout()
+        previous_btn = QPushButton('Previous unit')
+        previous_btn.clicked.connect(self.go_to_previous_subtitle)
+        next_btn = QPushButton('Next unit')
+        next_btn.clicked.connect(self.go_to_next_subtitle)
+        player_controls_layout.addWidget(previous_btn)
         player_controls_layout.addWidget(self.play_pause_btn)
+        player_controls_layout.addWidget(next_btn)
         player_controls_layout.addWidget(self.seek_slider, 1)
         player_controls_layout.addWidget(self.time_label)
 
@@ -299,7 +325,7 @@ class VideoAnnotator(QMainWindow):
         self.add_column_btn.clicked.connect(self.add_custom_column)
         self.add_column_btn.setMaximumWidth(80)
         
-        self.next_uncoded_btn = QPushButton("Next Uncoded")
+        self.next_uncoded_btn = QPushButton("Next Unfinished")
         self.next_uncoded_btn.clicked.connect(self.jump_to_next_uncoded)
         self.next_uncoded_btn.setMaximumWidth(120)
         self.clear_filters_btn = QPushButton("Clear")
@@ -308,6 +334,7 @@ class VideoAnnotator(QMainWindow):
 
         filter_bar = QHBoxLayout()
         filter_bar.addWidget(self.search_edit, 1)
+        self.add_review_filter(filter_bar)
         filter_bar.addWidget(self.add_column_btn)
         filter_bar.addWidget(self.next_uncoded_btn)
         filter_bar.addWidget(self.clear_filters_btn)
@@ -328,6 +355,8 @@ class VideoAnnotator(QMainWindow):
         main_splitter.addWidget(subtitle_panel)
         main_splitter.setStretchFactor(0, 2)
         main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([540, 260])
+        subtitle_panel.setMinimumHeight(180)
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(main_splitter)
@@ -338,7 +367,8 @@ class VideoAnnotator(QMainWindow):
 
         self.create_menu_bar()
         self.installEventFilter(self)
-        self.resize(1100, 750)
+        available = self.screen().availableGeometry()
+        self.resize(min(1250, int(available.width() * 0.95)), min(900, int(available.height() * 0.9)))
 
         # Status bar with live progress and shortcut hints.
         self.progress_label = QLabel("")
@@ -354,6 +384,7 @@ class VideoAnnotator(QMainWindow):
 
         QTimer.singleShot(0, self.try_restore_autosave)
 
+        self.ready = True
         self.mediaPlayer.play()
         self.jump_to_subtitle(self.current_subtitle_index)
 
@@ -363,12 +394,30 @@ class VideoAnnotator(QMainWindow):
 
     def update_window_title(self):
         name = Path(self.vat_file).name if self.vat_file else Path(self.srt_file).name
-        self.setWindowTitle(f"CIGA Annotator - {name}")
+        self.setWindowTitle(f"CIGA Annotator - {name}" + (" *" if self.is_dirty else ""))
 
     def create_menu_bar(self):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("File")
+        edit_menu = menu_bar.addMenu("Edit")
+        self.undo_action = QAction("Undo Coding", self)
+        self.undo_action.setShortcut("Ctrl+Z")
+        self.undo_action.triggered.connect(self.undo_coding)
+        edit_menu.addAction(self.undo_action)
+        self.redo_action = QAction("Redo Coding", self)
+        self.redo_action.setShortcut("Ctrl+Shift+Z")
+        self.redo_action.triggered.connect(self.redo_coding)
+        edit_menu.addAction(self.redo_action)
         tools_menu = menu_bar.addMenu("Tools")
+        rules_action = QAction("Project Coding Rules…", self)
+        rules_action.triggered.connect(self.show_research_settings)
+        tools_menu.addAction(rules_action)
+        comparison_action = QAction("Compare Another Coder’s Project…", self)
+        comparison_action.triggered.connect(self.compare_project_dialog)
+        tools_menu.addAction(comparison_action)
+        history_action = QAction('Material and Coding History…', self)
+        history_action.triggered.connect(self.show_project_history)
+        tools_menu.addAction(history_action)
         help_menu = menu_bar.addMenu("Help")
         
         new_action = QAction("New Project", self)
@@ -386,15 +435,21 @@ class VideoAnnotator(QMainWindow):
         save_action.triggered.connect(self.save_project)
         file_menu.addAction(save_action)
 
+        export_characters = QAction('Export Character Template…', self)
+        export_characters.triggered.connect(self.export_characters_dialog)
+        file_menu.addAction(export_characters)
         save_as_action = QAction("Save Project As...", self)
         save_as_action.triggered.connect(self.save_project_as_dialog)
         file_menu.addAction(save_as_action)
 
         file_menu.addSeparator()
 
-        export_csv_action = QAction("Export to CSV", self)
+        export_csv_action = QAction("Export All Coding to CSV…", self)
         export_csv_action.triggered.connect(self.export_csv_dialog)
         file_menu.addAction(export_csv_action)
+        analysis_action = QAction("Export Confirmed Coding for Analysis…", self)
+        analysis_action.triggered.connect(self.export_analysis_dialog)
+        file_menu.addAction(analysis_action)
 
         import_csv_action = QAction("Import from CSV", self)
         import_csv_action.triggered.connect(self.import_csv_dialog)
@@ -406,7 +461,7 @@ class VideoAnnotator(QMainWindow):
         preferences_action.triggered.connect(self.show_preferences)
         file_menu.addAction(preferences_action)
 
-        self.next_uncoded_action = QAction("Jump to Next Uncoded", self)
+        self.next_uncoded_action = QAction("Jump to Next Unfinished", self)
         self.next_uncoded_action.setShortcut(self.app_settings.get_hotkey("next_uncoded"))
         self.next_uncoded_action.triggered.connect(self.jump_to_next_uncoded)
         tools_menu.addAction(self.next_uncoded_action)
@@ -472,6 +527,7 @@ class VideoAnnotator(QMainWindow):
         self.speaker_summary.setText(', '.join(self.current_speakers))
         self.listener_summary.setText(', '.join(self.current_listeners))
         self.target_summary.setText(', '.join(self.current_targets))
+        self.sync_research_controls()
 
     def update_active_role_ui(self):
         role_name = {
@@ -480,8 +536,9 @@ class VideoAnnotator(QMainWindow):
             'targets': 'Target'
         }.get(self.active_role, 'Speaker')
         self.active_role_label.setText(role_name)
+        self.sync_research_controls()
         self.hint_label.setText(
-            f"Active: {role_name}  |  Ctrl+1/2/3/Q: switch role  Alt+[character key]: code  Left/Right: seek  Up/Down: prev/next"
+            f"Active: {role_name} · Alt+[character key]: code · {self.app_settings.get_hotkey("next_uncoded")}: next unfinished · Ctrl+S: save project"
         )
 
         active_style = "font-weight: bold; color: #4DA6FF;" # Bright blue
@@ -512,13 +569,13 @@ class VideoAnnotator(QMainWindow):
     def set_active_role(self, role):
         if role in ['speakers', 'listeners', 'targets']:
             self.active_role = role
+            self.right_tabs.setCurrentIndex(0)
             self.update_active_role_ui()
 
     def cycle_active_role(self):
         roles = ['speakers', 'listeners', 'targets']
         idx = roles.index(self.active_role)
-        self.active_role = roles[(idx + 1) % len(roles)]
-        self.update_active_role_ui()
+        self.set_active_role(roles[(idx + 1) % len(roles)])
 
     def sanitize_role_values(self):
         valid_names = {char['name'] for char in self.characters}
@@ -536,14 +593,18 @@ class VideoAnnotator(QMainWindow):
         if row >= len(self.characters):
             return  # Can't delete the new character placeholder row
         
-        reply = QMessageBox.question(
-            self, 'Delete Character',
-            f"Are you sure you want to delete character '{self.characters[row]['name']}'?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
+        name = self.characters[row]['name']
+        referenced = sum(any(name in annotation.get(role, []) for role in ROLES) for annotation in self.annotations.values())
+        if referenced:
+            QMessageBox.information(self, 'Character is in use',
+                                    f"'{name}' is referenced by {referenced} coding units. Remove those selections before deleting it. Renaming preserves its identity.")
+            return
+        reply = QMessageBox.question(self, 'Delete Character', f"Delete unused character '{name}'?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
+            self.audit('Delete unused character', before=self.characters[row])
             del self.characters[row]
-            save_characters(self.char_file, self.characters)
+            self.history = CodingHistory()
             self.setup_character_table(self.character_table)
             self.sanitize_role_values()
             self.is_dirty = True
@@ -566,6 +627,8 @@ class VideoAnnotator(QMainWindow):
             # If they typed in Name col for new character
             if col == 0:
                 error = validate_character_name(text)
+                if text.casefold() in {character['name'].casefold() for character in self.characters}:
+                    error = 'A character with this name already exists.'
                 if error:
                     QMessageBox.warning(self, "Invalid Name", error)
                     self._updating_table = True
@@ -582,7 +645,8 @@ class VideoAnnotator(QMainWindow):
                         break
                 
                 self.characters.append({'name': name, 'key': assigned_key})
-                save_characters(self.char_file, self.characters)
+                ensure_character_ids(self.characters)
+                self.audit('Add character', after=self.characters[-1])
                 self.setup_character_table(self.character_table)
                 self.sanitize_role_values()
                 self.is_dirty = True
@@ -594,6 +658,8 @@ class VideoAnnotator(QMainWindow):
             # Editing existing
             if col == 0:
                 error = validate_character_name(text)
+                if any(index != row and character['name'].casefold() == text.casefold() for index, character in enumerate(self.characters)):
+                    error = 'A character with this name already exists.'
                 if error:
                     # Emptied or invalid: restore the previous name.
                     if text:
@@ -602,7 +668,20 @@ class VideoAnnotator(QMainWindow):
                     item.setText(self.characters[row]['name'])
                     self._updating_table = False
                     return
+                previous_name = self.characters[row]['name']
+                if text != previous_name:
+                    self.characters[row]['aliases'].append(previous_name)
+                    self.audit('Rename character', before={'name': previous_name, 'id': self.characters[row]['id']}, after={'name': text, 'id': self.characters[row]['id']})
                 self.characters[row]['name'] = text
+                if previous_name != text:
+                    for annotation in self.annotations.values():
+                        for role in ('speakers', 'listeners', 'targets'):
+                            annotation[role] = [text if name == previous_name else name
+                                                for name in annotation.get(role, [])]
+                    for names in (self.current_speakers, self.current_listeners, self.current_targets):
+                        names[:] = [text if name == previous_name else name for name in names]
+                    for index in self.annotations:
+                        self.refresh_subtitle_row(index)
             elif col == 1:
                 k = text.upper()
                 if k and (len(k) != 1 or not k.isprintable() or k == ' '):
@@ -625,13 +704,15 @@ class VideoAnnotator(QMainWindow):
                 else:
                     self.characters[row]['key'] = None
                     
-            save_characters(self.char_file, self.characters)
+            self.history = CodingHistory()  # Old patches contain previous display names.
             self.setup_character_table(self.character_table) # Re-render to ensure styling and proper state
             self.sanitize_role_values()
             self.is_dirty = True
             self.update_progress_status()
 
     def focus_new_character_row(self):
+        self.right_tabs.setCurrentIndex(1)
+        self.character_table.setFocus()
         new_row = len(self.characters)
         item = self.character_table.item(new_row, 0)
         self.character_table.setCurrentItem(item)
@@ -647,9 +728,9 @@ class VideoAnnotator(QMainWindow):
 
     def setup_subtitle_list(self):
         base_cols = ["#", "Start", "End", "Text", "Speaker", "Listener", "Target"]
-        total_cols = len(base_cols) + len(self.custom_columns)
+        total_cols = len(base_cols) + len(self.custom_columns) + 1
         self.subtitle_list.setColumnCount(total_cols)
-        self.subtitle_list.setHorizontalHeaderLabels(base_cols + self.custom_columns)
+        self.subtitle_list.setHorizontalHeaderLabels(base_cols + self.custom_columns + ["Review"])
         self.subtitle_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.subtitle_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.subtitle_list.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
@@ -680,6 +761,9 @@ class VideoAnnotator(QMainWindow):
         for j in range(len(self.custom_columns)):
             self.subtitle_list.setColumnWidth(7 + j, 220)
             
+        for index in range(len(self.subtitles)):
+            self.refresh_subtitle_row(index)
+        self.subtitle_list.setColumnWidth(7 + len(self.custom_columns), 120)
         self.apply_subtitle_filters()
 
     def _make_readonly_item(self, text):
@@ -689,30 +773,27 @@ class VideoAnnotator(QMainWindow):
 
     def clear_subtitle_filters(self):
         self.search_edit.clear()
+        self.review_filter.setCurrentIndex(0)
         self.app_settings.set("only_uncoded", False)
         self.apply_subtitle_filters()
 
     def add_custom_column(self):
-        col_name, ok = QInputDialog.getText(self, "Add Custom Column", "Column Name:")
-        if ok and col_name:
-            col_name = col_name.strip()
-            if col_name and col_name not in self.custom_columns:
-                self.custom_columns.append(col_name)
-                
-                col_idx = 6 + len(self.custom_columns)
-                self.subtitle_list.insertColumn(col_idx)
-                
-                base_cols = ["#", "Start", "End", "Text", "Speaker", "Listener", "Target"]
-                self.subtitle_list.setHorizontalHeaderLabels(base_cols + self.custom_columns)
-                
-                self._updating_table = True
-                for i in range(len(self.subtitles)):
-                    val = self.annotations.get(i, {}).get(col_name, "")
-                    self.subtitle_list.setItem(i, col_idx, QTableWidgetItem(val))
-                self.subtitle_list.setColumnWidth(col_idx, 220)
-                self._updating_table = False
-                
-                self.is_dirty = True
+        name, ok = QInputDialog.getText(self, 'Add Custom Column', 'Column name:')
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        reserved = {'line', 'position', 'start_time', 'end_time', *ROLES, 'note', 'unit_id',
+                    'subtitle_sha256', 'review_state', 'not_applicable', 'coder_id',
+                    'codebook_version', 'confirmation', 'exclusion_reason', 'study_rules'}
+        if name in reserved or name in self.custom_columns:
+            QMessageBox.warning(self, 'Reserved column', 'Choose a unique name that is not a built-in coding field.')
+            return
+        self.custom_columns.append(name)
+        with QSignalBlocker(self.subtitle_list):
+            self.setup_subtitle_list()
+        self.audit('Add custom column', after=name)
+        self.is_dirty = True
+        self.update_progress_status()
 
     def apply_subtitle_filters(self):
         query = self.search_edit.text().strip().lower()
@@ -720,7 +801,12 @@ class VideoAnnotator(QMainWindow):
         for i, sub in enumerate(self.subtitles):
             status = self.get_annotation_status(i)
             match_text = query in sub['text'].lower() if query else True
-            match_coded = (status == "Uncoded") if only_uncoded else True
+            state = review_state(self.annotations.get(i, {}))
+            match_coded = state not in ('confirmed', 'excluded') if only_uncoded else True
+            selected = self.review_filter.currentData()
+            match_review = (selected == 'all' or selected == state or
+                            (selected == 'unfinished' and state not in ('confirmed', 'excluded')))
+            match_coded = match_coded and match_review
             self.subtitle_list.setRowHidden(i, not (match_text and match_coded))
 
     def apply_inheritance_to_current(self):
@@ -733,6 +819,12 @@ class VideoAnnotator(QMainWindow):
             self.current_listeners = list(prev_ann.get('listeners', []))        
         if self.app_settings.get("inherit_target", False):
             self.current_targets = list(prev_ann.get('targets', []))
+        if self.current_listeners or self.current_targets:
+            self.commit_annotation(self.current_subtitle_index, {
+                'speakers': self.current_speakers, 'listeners': self.current_listeners,
+                'targets': self.current_targets, 'note': '',
+                'inherited_from': self.material['unit_ids'][self.current_subtitle_index - 1],
+            }, 'Inherit previous roles')
         self.refresh_role_summary()
 
     def _extract_shortcut(self, event):
@@ -763,16 +855,16 @@ class VideoAnnotator(QMainWindow):
     def on_note_text_changed(self, text):
         if self._updating_table:
             return
-        self.record_annotation(self.current_subtitle_index, clear_selections=False)
+        self.record_annotation(self.current_subtitle_index, clear_selections=False, action="Edit note")
 
     def on_subtitle_item_changed(self, item):
         if self._updating_table:
             return
         col = item.column()
-        if col < 7:
+        if col < 7 or col >= 7 + len(self.custom_columns):
             return
         row = item.row()
-        ann = self.annotations.get(row, {'speakers': [], 'listeners': [], 'targets': []})
+        ann = deepcopy(self.annotations.get(row, {'speakers': [], 'listeners': [], 'targets': []}))
         
         col_idx = col - 7
         if col_idx < len(self.custom_columns):
@@ -781,7 +873,7 @@ class VideoAnnotator(QMainWindow):
             if col_name == "Note":
                 ann["note"] = item.text().strip()
                 
-        self.annotations[row] = ann
+        self.commit_annotation(row, ann, "Edit note" if col_name == "Note" else "Edit custom field")
         if row == self.current_subtitle_index:
             self._updating_table = True
             if "Note" in self.custom_columns and col_idx < len(self.custom_columns) and self.custom_columns[col_idx] == "Note":
@@ -801,8 +893,13 @@ class VideoAnnotator(QMainWindow):
         row = item.row()
         self.jump_to_subtitle(row)
 
-    def jump_to_subtitle(self, index):
+    def jump_to_subtitle(self, index, inherit=True):
         if 0 <= index < len(self.subtitles):
+            if index != self.current_subtitle_index:
+                self.break_note_edit()
+            if self.subtitle_list.isRowHidden(index):
+                self.clear_subtitle_filters()
+                self.statusBar().showMessage('Filters cleared to show the selected coding unit.', 5000)
             self.current_subtitle_index = index
             subtitle = self.subtitles[self.current_subtitle_index]
             self.mediaPlayer.setPosition(subtitle['start_time'])
@@ -819,23 +916,15 @@ class VideoAnnotator(QMainWindow):
             self._updating_table = True
             self.note_edit.setText(ann.get('note', ''))
             self._updating_table = False
-            self.apply_inheritance_to_current()
+            if inherit:
+                self.apply_inheritance_to_current()
             self.refresh_role_summary()
             self.update_progress_status()
             
             self.mediaPlayer.play()
 
     def get_annotation_status(self, index):
-        ann = self.annotations.get(index, {})
-        speakers = ann.get('speakers', [])
-        listeners = ann.get('listeners', [])
-        targets = ann.get('targets', [])
-        filled = int(bool(speakers)) + int(bool(listeners)) + int(bool(targets))
-        if filled == 0:
-            return "Uncoded"
-        if filled == 3:
-            return "Done"
-        return "Partial"
+        return STATES[review_state(self.annotations.get(index, {}))]
 
     def refresh_subtitle_row(self, index):
         if index < 0 or index >= len(self.subtitles):
@@ -857,14 +946,15 @@ class VideoAnnotator(QMainWindow):
                 val = ann.get("note", "")
             self.subtitle_list.setItem(index, 7 + j, QTableWidgetItem(val))
 
-        if status == "Done":
+        self.subtitle_list.setItem(index, 7 + len(self.custom_columns), self._make_readonly_item(status))
+        if status == "Confirmed":
             status_color = QColor(40, 167, 69, 50)
-        elif status == "Partial":
+        elif status in ("In progress", "Needs review"):
             status_color = QColor(255, 193, 7, 50)
         else:
             status_color = None
 
-        col_count = 7 + len(self.custom_columns)
+        col_count = self.subtitle_list.columnCount()
         for col in range(col_count):
             if self.subtitle_list.item(index, col):
                 if col == 0 and status_color:
@@ -874,34 +964,33 @@ class VideoAnnotator(QMainWindow):
         self._updating_table = False
 
     def jump_to_next_uncoded(self):
+        self.record_annotation(self.current_subtitle_index, clear_selections=False)
         start = self.current_subtitle_index + 1
         for i in range(start, len(self.subtitles)):
-            if self.get_annotation_status(i) == "Uncoded":
+            if self.get_annotation_status(i) not in ("Confirmed", "Excluded"):
                 self.record_annotation(self.current_subtitle_index, clear_selections=False)
                 self.jump_to_subtitle(i)
                 return
         for i in range(0, start):
-            if self.get_annotation_status(i) == "Uncoded":
+            if self.get_annotation_status(i) not in ("Confirmed", "Excluded"):
                 self.record_annotation(self.current_subtitle_index, clear_selections=False)
                 self.jump_to_subtitle(i)
                 return
-        QMessageBox.information(self, "All Coded", "No uncoded subtitle line remains.")
+        self.statusBar().showMessage('Every unit is confirmed or explicitly excluded.', 10000)
 
     def show_shortcuts_help(self):
-        QMessageBox.information(
-            self,
-            "Keyboard Shortcuts",
-            "Space: Play/Pause and step subtitle\n"
-            "Up / Down: Previous / Next subtitle\n"
-            "Left / Right: Rewind / Forward 2 seconds\n"
-            "N: Jump to next uncoded line\n"
-            "Ctrl+F: Focus search\n"
-            "F1: Show this help\n"
-            "Ctrl+1, 2, 3: Set active coding role (Speaker, Listener, Target)\n"
-            "Ctrl+Q: Cycle active coding role\n"
-            "Alt + [Character key]: Toggle character in active role\n\n"
-            "(Shortcuts can be customized in File -> Preferences)"
-        )
+        descriptions = {'play_pause': 'Play/pause', 'prev_subtitle': 'Previous unit',
+                        'next_subtitle': 'Next unit', 'seek_back': 'Rewind 2 seconds',
+                        'seek_forward': 'Forward 2 seconds', 'next_uncoded': 'Next unfinished unit',
+                        'focus_search': 'Search', 'shortcuts_help': 'Help',
+                        'role_speakers': 'Speaker', 'role_listeners': 'Listener',
+                        'role_targets': 'Target', 'cycle_role': 'Cycle coding roles'}
+        lines = [f'{self.app_settings.get_hotkey(action) or "Unassigned"}: {label}' for action, label in descriptions.items()]
+        lines += ['Alt+[character key]: toggle character', 'Ctrl+N: add character', 'Ctrl+S: save project',
+                  'Ctrl+Z: undo coding', 'Ctrl+Shift+Z: redo coding',
+                  '', 'While typing in a text field, text-editing keys remain available.',
+                  'Click the video or a role button to resume coding shortcuts.']
+        QMessageBox.information(self, 'Keyboard Shortcuts', '\n'.join(lines))
 
     def show_preferences(self):
         dialog = SettingsDialog(self, self.app_settings)
@@ -910,8 +999,9 @@ class VideoAnnotator(QMainWindow):
             self.apply_subtitle_filters()
             self.next_uncoded_action.setShortcut(self.app_settings.get_hotkey("next_uncoded"))
             self.shortcuts_help_action.setShortcut(self.app_settings.get_hotkey("shortcuts_help"))
+            self.update_active_role_ui()
 
-    def record_annotation(self, index, clear_selections=True):
+    def record_annotation(self, index, clear_selections=True, action="Edit coding"):
         if index >= len(self.subtitles): return
         
         speakers = list(self.current_speakers)
@@ -922,19 +1012,22 @@ class VideoAnnotator(QMainWindow):
         if not speakers and not listeners and not targets and not note and index not in self.annotations:
             return # nothing to record
             
-        ann = self.annotations.get(index, {})
+        previous = self.annotations.get(index, {})
+        ann = dict(previous)
         ann['speakers'] = speakers
         ann['listeners'] = listeners
         ann['targets'] = targets
         ann['note'] = note
+        if 'Note' in self.custom_columns:
+            ann['Note'] = note
         
-        self.annotations[index] = ann
+        self.commit_annotation(index, ann, action)
 
         if clear_selections:
             self.current_speakers = []
             self.current_listeners = []
             self.current_targets = []
-            self.refresh_role_summary()
+        self.refresh_role_summary()
         self.apply_subtitle_filters()
         self.update_progress_status()
 
@@ -949,9 +1042,9 @@ class VideoAnnotator(QMainWindow):
         return seq.matches(QKeySequence(event_key_combination)) == QKeySequence.ExactMatch
 
     def eventFilter(self, source, event):
+        if event.type() == QEvent.FocusIn and source is getattr(self, 'videoWidget', None):
+            self.right_tabs.setCurrentIndex(0)
         if event.type() == QEvent.KeyPress:
-            if event.isAutoRepeat():
-                return True
             active_modal = QApplication.activeModalWidget()
             if active_modal and active_modal is not self:
                 return False
@@ -967,6 +1060,8 @@ class VideoAnnotator(QMainWindow):
             focused = QApplication.focusWidget()
             if (isinstance(focused, QLineEdit) and not focused.isReadOnly()) or focused is self.character_table:
                 return False
+            if event.isAutoRepeat():
+                return True
                 
             if self._is_hotkey(event, "next_uncoded"):
                 self.jump_to_next_uncoded()
@@ -1094,8 +1189,11 @@ class VideoAnnotator(QMainWindow):
             self.mediaPlayer.pause()
         else:
             if self.paused_at_subtitle_end:
-                self.record_annotation(self.current_subtitle_index, clear_selections=True)
-                self.jump_to_subtitle(self.current_subtitle_index + 1)
+                self.record_annotation(self.current_subtitle_index, clear_selections=False)
+                if self.current_subtitle_index < len(self.subtitles) - 1:
+                    self.jump_to_subtitle(self.current_subtitle_index + 1)
+                else:
+                    self.statusBar().showMessage('End of subtitle material. Current coding is preserved.', 8000)
             else:
                 self.mediaPlayer.play()
         self.update_play_button_text()
@@ -1155,6 +1253,7 @@ class VideoAnnotator(QMainWindow):
             return False
         self.vat_file = file_path
         self.is_dirty = False
+        self.break_note_edit()
         self.discard_autosave()
         self.update_window_title()
         self.update_progress_status()
@@ -1178,6 +1277,10 @@ class VideoAnnotator(QMainWindow):
             "char_file": rel_path(self.char_file),
             "characters": self.characters,
             "custom_columns": getattr(self, 'custom_columns', ['Note']),
+            "schema_version": 2,
+            "study": self.study,
+            "material": self.material,
+            "audit_log": self.audit_log,
             "annotations": self.annotations
         }
 
@@ -1189,13 +1292,15 @@ class VideoAnnotator(QMainWindow):
 
         save_path, _ = QFileDialog.getSaveFileName(self, "Export to CSV", "annotations.csv", "CSV Files (*.csv)")
         if save_path:
-            self.export_csv(save_path)
+            self.export_csv(save_path, include_metadata=True)
 
-    def export_csv(self, file_path):
+    def export_csv(self, file_path, confirmed_only=False, include_metadata=False):
         try:
             rows = []
             for i, sub in enumerate(self.subtitles):
                 ann = self.annotations.get(i, {})
+                if confirmed_only and review_state(ann) != 'confirmed':
+                    continue
                 spk = ', '.join(ann.get('speakers', []))
                 lst = ', '.join(ann.get('listeners', []))
                 tgt = ', '.join(ann.get('targets', []))
@@ -1221,99 +1326,148 @@ class VideoAnnotator(QMainWindow):
                     if val.strip():
                         has_custom = True
                         
-                if spk or lst or tgt or has_custom:
+                if include_metadata:
+                    row_data.update({
+                        'unit_id': self.material['unit_ids'][i],
+                        'subtitle_sha256': self.material['subtitle_sha256'],
+                        'review_state': review_state(ann),
+                        'not_applicable': json.dumps(ann.get('not_applicable', [])),
+                        'coder_id': self.study['coder_id'],
+                        'codebook_version': self.study['codebook_version'],
+                        'confirmation': json.dumps(ann.get('confirmation', {})),
+                        'exclusion_reason': ann.get('exclusion_reason', ''),
+                        'study_rules': json.dumps({key: value for key, value in self.study.items() if key != 'coder_id'}),
+                    })
+                if confirmed_only or include_metadata or spk or lst or tgt or has_custom:
                     rows.append(row_data)
 
             fieldnames = ['line', 'position', 'start_time', 'end_time', 'speakers', 'listeners', 'targets']
             fieldnames += [c for c in getattr(self, 'custom_columns', ['Note']) if c != 'position']
+            if include_metadata:
+                fieldnames += ['unit_id', 'subtitle_sha256', 'review_state', 'not_applicable', 'coder_id',
+                               'codebook_version', 'confirmation', 'exclusion_reason', 'study_rules']
             write_rows_to_csv_atomic(file_path, rows, fieldnames=fieldnames)
-            self.is_dirty = False
             self.update_progress_status()
-            QMessageBox.information(self, "Success", f"Annotations saved to {file_path}")
+            self.statusBar().showMessage(f"CSV exported to {file_path}. Save Project keeps your project changes.", 10000)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export CSV: {e}")
 
     def import_csv_dialog(self):
         load_path, _ = QFileDialog.getOpenFileName(self, "Import from CSV", "", "CSV Files (*.csv)")
         if load_path:
+            if self.annotations and QMessageBox.question(self, 'Replace current coding?',
+                    'Import replaces the coding in this project. Save a project copy first if you need to keep both versions.',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
             self.import_csv(load_path)
 
     def import_csv(self, file_path):
-        # Replacing items must not invoke edit callbacks with deleted Qt items.
-        signal_blocker = QSignalBlocker(self.subtitle_list)
+        # Validate everything before replacing project data; failed imports preserve work.
         try:
             with open(file_path, 'r', newline='', encoding='utf-8-sig') as csvfile:
                 reader = csv.DictReader(csvfile)
-                loaded_data = list(reader)
-                if loaded_data:
-                    # Capture any new custom columns from the CSV
-                    base_fields = {'line', 'position', 'start_time', 'end_time', 'speakers', 'listeners', 'targets'}
-                    csv_fields = set(reader.fieldnames) if reader.fieldnames else set(loaded_data[0].keys())
-                    new_cols = [f for f in csv_fields if f not in base_fields and f not in self.custom_columns and f != 'note']
-                    if new_cols:
-                        self.custom_columns.extend(new_cols)
-                        
-                    # Reconfigure table columns if needed
-                    self.setup_subtitle_list()
-
-            self.annotations.clear()
-            col_count = 7 + len(self.custom_columns)
-            for i in range(len(self.subtitles)):
-                self.subtitle_list.setItem(i, 4, self._make_readonly_item(""))
-                self.subtitle_list.setItem(i, 5, self._make_readonly_item(""))
-                self.subtitle_list.setItem(i, 6, self._make_readonly_item(""))
-                for j in range(len(self.custom_columns)):
-                    self.subtitle_list.setItem(i, 7 + j, QTableWidgetItem(""))
-                for col in range(col_count):
-                    if self.subtitle_list.item(i, col):
-                        self.subtitle_list.item(i, col).setData(Qt.BackgroundRole, None)
-
-            for row in loaded_data:
-                for i, sub in enumerate(self.subtitles):
-                    if (milliseconds_to_srt_time(sub['start_time']) == row.get('start_time') and
-                        milliseconds_to_srt_time(sub['end_time']) == row.get('end_time')):
-
-                        ann = {
-                            'speakers': [s.strip() for s in row.get('speakers', '').split(',')] if row.get('speakers') else [],
-                            'listeners': [s.strip() for s in row.get('listeners', '').split(',')] if row.get('listeners') else [],
-                            'targets': [s.strip() for s in row.get('targets', '').split(',')] if row.get('targets') else []
-                        }
-                        
-                        for c in self.custom_columns:
-                            ann[c] = row.get(c, '').strip()
-                        if 'note' in row:
-                            ann['note'] = row.get('note', '').strip()
-                        
-                        self.annotations[i] = ann
-                        self.refresh_subtitle_row(i)
-                        break
-
+                fields = reader.fieldnames or []
+                if not {'start_time', 'end_time'}.issubset(fields):
+                    raise ValueError('CSV requires start_time and end_time columns.')
+                loaded = list(reader)
+            reserved = {'line', 'position', 'start_time', 'end_time', *ROLES, 'note',
+                        'unit_id', 'subtitle_sha256', 'review_state', 'not_applicable', 'coder_id',
+                        'codebook_version', 'confirmation', 'exclusion_reason', 'study_rules'}
+            columns = list(self.custom_columns)
+            columns.extend(field for field in fields if field not in reserved and field not in columns)
+            units = {}
+            for index, sub in enumerate(self.subtitles):
+                times = (milliseconds_to_srt_time(sub['start_time']), milliseconds_to_srt_time(sub['end_time']))
+                units.setdefault(times, []).append(index)
+            annotations = {}
+            for row in loaded:
+                candidates = units.get((row.get('start_time'), row.get('end_time')), [])
+                position = row.get('position')
+                if position:
+                    index = int(position) - 1
+                    if index not in candidates:
+                        raise ValueError('CSV position and timestamps refer to different coding units.')
+                elif len(candidates) == 1:
+                    index = candidates[0]
+                elif len(candidates) > 1:
+                    raise ValueError('Multiple units share these timestamps. Include the original numeric position column.')
+                else:
+                    raise ValueError('CSV contains a unit whose timestamps do not match these subtitles.')
+                if row.get('line') and row['line'] != self.subtitles[index]['text']:
+                    raise ValueError('CSV subtitle text differs from this coding material.')
+                if index in annotations:
+                    raise ValueError('CSV contains duplicate coding units.')
+                if row.get('subtitle_sha256') and row['subtitle_sha256'] != self.material['subtitle_sha256']:
+                    raise ValueError('CSV was exported from different subtitle material.')
+                if row.get('unit_id') and row['unit_id'] != self.material['unit_ids'][index]:
+                    raise ValueError('CSV coding-unit identity does not match these subtitles.')
+                annotation = {role: [name.strip() for name in row.get(role, '').split(',') if name.strip()]
+                              for role in ROLES}
+                for column in columns:
+                    annotation[column] = row.get(column, '').strip()
+                annotation['note'] = row.get('note', row.get('Note', '')).strip()
+                annotation['not_applicable'] = json.loads(row.get('not_applicable') or '[]')
+                if not isinstance(annotation['not_applicable'], list) or any(role not in ROLES for role in annotation['not_applicable']):
+                    raise ValueError('Invalid N/A role metadata.')
+                if any(annotation[role] and role in annotation['not_applicable'] for role in ROLES):
+                    raise ValueError('A role cannot contain characters and also be N/A.')
+                annotation['review_state'] = row.get('review_state') or review_state(annotation)
+                if annotation['review_state'] not in STATES:
+                    raise ValueError('Unknown review state in CSV.')
+                annotation['exclusion_reason'] = row.get('exclusion_reason', '')
+                if annotation['review_state'] == 'confirmed':
+                    rules = json.loads(row.get('study_rules') or '{}')
+                    matching = all(rules.get(key) == self.study[key] for key in ('required_roles', 'definitions', 'codebook_version'))
+                    confirmation = json.loads(row.get('confirmation') or '{}')
+                    if row.get('unit_id') and matching and confirmation and not missing_roles(annotation, self.study):
+                        annotation['confirmation'] = confirmation
+                    else:
+                        annotation['review_state'] = 'needs_review'
+                annotations[index] = annotation
+            old = deepcopy(self.annotations)
+            characters = deepcopy(self.characters)
+            names = {character['name'] for character in characters}
+            for annotation in annotations.values():
+                for role in ROLES:
+                    for name in annotation[role]:
+                        if name not in names:
+                            error = validate_character_name(name)
+                            if error:
+                                raise ValueError(error)
+                            characters.append({'name': name, 'key': None})
+                            names.add(name)
+            ensure_character_ids(characters)
+            imported = {index: normalize_annotation(annotation, characters)
+                                for index, annotation in annotations.items()}
+            self.characters = characters
+            self.annotations = imported
+            self.custom_columns = columns
+            self.history = CodingHistory()
+            self.audit('Import CSV', before=old, after=self.annotations, source_file=str(file_path))
+            with QSignalBlocker(self.subtitle_list):
+                self.setup_subtitle_list()
+            self.setup_character_table(self.character_table)
             self.is_dirty = True
             self.jump_to_subtitle(self.current_subtitle_index)
             self.apply_subtitle_filters()
             self.update_progress_status()
-            QMessageBox.information(self, "Success", f"Annotations loaded from {file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load annotations: {e}")
-        finally:
-            signal_blocker.unblock()
+            self.statusBar().showMessage(f'Imported {len(annotations)} units. Save Project to keep them.', 8000)
+            return True
+        except Exception as error:
+            QMessageBox.critical(self, 'CSV import failed', str(error))
+            return False
 
     def update_progress_status(self):
         total = len(self.subtitles)
-        done = 0
-        partial = 0
-        for i in range(total):
-            status = self.get_annotation_status(i)
-            if status == "Done":
-                done += 1
-            elif status == "Partial":
-                partial += 1
-        coded = done + partial
-        pct = int((done / total) * 100) if total else 0
-        dirty_tag = " (unsaved)" if self.is_dirty else ""
+        counts = {state: 0 for state in STATES}
+        for annotation_index in range(total):
+            counts[review_state(self.annotations.get(annotation_index, {}))] += 1
+        saved = 'Unsaved changes' if self.is_dirty else ('Project saved' if self.vat_file else 'Project not saved yet')
+        recovery = f' · Recovery: {self.last_autosave}' if self.last_autosave else ''
         self.progress_label.setText(
-            f"Line {self.current_subtitle_index + 1}/{total}  |  Done: {done}  Partial: {partial}  Coded: {coded}/{total} ({pct}%)" + dirty_tag
-        )
+            f"Unit {self.current_subtitle_index + 1}/{total} · Confirmed {counts['confirmed']} · Review {counts['needs_review']} · In progress {counts['in_progress']} · Excluded {counts['excluded']} · {saved}{recovery}")
+        self.update_window_title()
+        self.sync_research_controls()
 
     def autosave_annotations(self):
         """Write a crash-recovery copy; the user's project file is only written on save."""
@@ -1326,6 +1480,8 @@ class VideoAnnotator(QMainWindow):
             project_data[AUTOSAVE_OF_KEY] = str(Path(self.vat_file).absolute()) if self.vat_file else ""
             write_project_file(path, project_data)
             self._autosave_files.add(path)
+            self.last_autosave = now()[11:19]
+            self.update_progress_status()
         except Exception as e:
             # Autosave must never interrupt annotation, but a failure should be visible.
             self.statusBar().showMessage(f"Autosave failed: {e}", 10000)
@@ -1339,6 +1495,7 @@ class VideoAnnotator(QMainWindow):
                 self.statusBar().showMessage(f"Could not remove autosave {path}: {e}", 10000)
         if hasattr(self, '_autosave_files'):
             self._autosave_files.clear()
+        self.last_autosave = ''
 
     def try_restore_autosave(self):
         if self._recovered_from_autosave:
@@ -1366,6 +1523,9 @@ class VideoAnnotator(QMainWindow):
             self.request_open_project.emit(path)
 
     def closeEvent(self, event):
+        if not self.ready:
+            event.accept()
+            return
         if self.is_dirty:
             reply = QMessageBox.question(
                 self,
@@ -1383,6 +1543,7 @@ class VideoAnnotator(QMainWindow):
         self.discard_autosave()
         if hasattr(self, 'autosave_timer'):
             self.autosave_timer.stop()
+        self.mediaPlayer.stop()
         event.accept()
 
     @Slot(str)
