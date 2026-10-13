@@ -537,8 +537,9 @@ class VideoAnnotator(ResearchWorkflow, QMainWindow):
         }.get(self.active_role, 'Speaker')
         self.active_role_label.setText(role_name)
         self.sync_research_controls()
+        next_key = self.app_settings.get_hotkey('next_uncoded')
         self.hint_label.setText(
-            f"Active: {role_name} · Alt+[character key]: code · {self.app_settings.get_hotkey("next_uncoded")}: next unfinished · Ctrl+S: save project"
+            f"Active: {role_name} · Alt+[character key]: code · {next_key}: next unfinished · Ctrl+S: save project"
         )
 
         active_style = "font-weight: bold; color: #4DA6FF;" # Bright blue
