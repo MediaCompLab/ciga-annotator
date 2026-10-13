@@ -1,7 +1,7 @@
 """Save/autosave/restore behavior of the real annotator window, run offscreen.
 
-Dialogs are replaced with scripted answers so nothing blocks; the video file is an
-empty placeholder, which only makes the media player report an error.
+Dialogs are replaced with scripted answers so nothing blocks. Media decoding is
+disabled: these tests exercise project storage and widget input, not video codecs.
 """
 import json
 import csv
@@ -14,6 +14,8 @@ pytest.importorskip("PySide6.QtMultimedia")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox  # noqa: E402
+from PySide6.QtCore import Qt, QCoreApplication, QEvent  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 
 from src.core.project import AUTOSAVE_OF_KEY  # noqa: E402
 from src.ui.annotator_window import VideoAnnotator  # noqa: E402
@@ -30,6 +32,9 @@ def qapp():
 def answers(monkeypatch):
     """Scripted dialog answers; tests set answers['question'] etc. as needed."""
     script = {"question": QMessageBox.No, "save_path": ""}
+    from PySide6.QtMultimedia import QMediaPlayer
+    monkeypatch.setattr(QMediaPlayer, 'setSource', lambda *args: None)
+    monkeypatch.setattr(QMediaPlayer, 'play', lambda *args: None)
     shown = []
     for name in ("critical", "warning", "information"):
         monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, _n=name, **k: shown.append((_n, a[2] if len(a) > 2 else ""))))
@@ -294,3 +299,98 @@ def test_failed_csv_import_restores_table_edit_signals(qapp, answers, media):
     assert window.annotations[0]['Note'] == 'still editable'
     window.is_dirty = False
     _close(window)
+
+
+@pytest.fixture
+def coding_window(qapp, answers, media):
+    window = _open(media=media)
+    window.show()
+    window.activateWindow()
+    QTest.qWait(20)
+    qapp.installEventFilter(window)
+    yield window
+    qapp.removeEventFilter(window)
+    window.is_dirty = False
+    _close(window)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def _character_focus(window):
+    focused = QApplication.focusWidget()
+    return focused is window.character_table or (
+        focused is not None and window.character_table.isAncestorOf(focused)
+    )
+
+
+def _edit_new_character(window):
+    window.character_table.setFocus()
+    window.focus_new_character_row()
+    QApplication.processEvents()
+    editor = QApplication.focusWidget()
+    assert editor is not None and window.character_table.isAncestorOf(editor)
+    return editor
+
+
+def test_focus_video_click_exits_character_table_and_restores_coding(coding_window):
+    window = coding_window
+    window.character_table.setCurrentCell(0, 0)
+    window.character_table.setFocus()
+    assert _character_focus(window)
+
+    QTest.mouseClick(window.videoWidget, Qt.LeftButton)
+    QTest.qWait(20)
+    assert not _character_focus(window)
+    QTest.keyClick(QApplication.focusWidget(), Qt.Key_2, Qt.ControlModifier)
+    assert window.active_role == 'listeners'
+    QTest.keyClick(QApplication.focusWidget(), Qt.Key_1, Qt.AltModifier)
+    assert window.current_listeners == ['Sheldon']
+    assert window.annotations[0]['listeners'] == ['Sheldon']
+
+
+def test_focus_video_click_commits_name_without_queued_editor_stealing_focus(coding_window):
+    window = coding_window
+    editor = _edit_new_character(window)
+    QTest.keyClicks(editor, 'Nate')
+    assert window.current_subtitle_index == 0  # N must type into the editor.
+
+    QTest.mouseClick(window.videoWidget, Qt.LeftButton)
+    QTest.qWait(20)  # Allow the next-character timer to run.
+    assert window.characters[-1]['name'] == 'Nate'
+    assert not _character_focus(window)
+    QTest.keyClick(QApplication.focusWidget(), Qt.Key_3, Qt.AltModifier)
+    assert window.current_speakers == ['Nate']
+
+
+def test_focus_enter_keeps_bulk_character_entry_available(coding_window):
+    window = coding_window
+    editor = _edit_new_character(window)
+    QTest.keyClicks(editor, 'Nate')
+    QTest.keyClick(editor, Qt.Key_Return)
+    QTest.qWait(20)
+    assert window.characters[-1]['name'] == 'Nate'
+    assert _character_focus(window)
+    assert window.character_table.currentRow() == len(window.characters)
+
+
+@pytest.mark.parametrize('field', ['speaker_summary', 'listener_summary', 'target_summary'])
+def test_focus_readonly_role_panels_allow_coding_shortcuts(coding_window, field):
+    window = coding_window
+    summary = getattr(window, field)
+    QTest.mouseClick(summary, Qt.LeftButton)
+    assert QApplication.focusWidget() is summary
+    QTest.keyClick(summary, Qt.Key_2, Qt.ControlModifier)
+    assert window.active_role == 'listeners'
+    QTest.keyClick(summary, Qt.Key_1, Qt.AltModifier)
+    assert window.current_listeners == ['Sheldon']
+
+
+@pytest.mark.parametrize('field', ['note_edit', 'search_edit'])
+def test_focus_writable_fields_keep_text_input(coding_window, field):
+    window = coding_window
+    editor = getattr(window, field)
+    editor.setFocus()
+    QTest.keyClicks(editor, 'N')
+    assert editor.text() == 'N'
+    assert window.current_subtitle_index == 0
+    QTest.keyClick(editor, Qt.Key_1, Qt.AltModifier)
+    assert window.current_speakers == []

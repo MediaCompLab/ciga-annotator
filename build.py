@@ -15,6 +15,7 @@ if sys.platform == 'win32':
         windows_root / 'System32', windows_root,
     )))
 sys.path.insert(0, str(ROOT))
+from src.version import __version__
 for directory in ('build', 'dist'):
     if (ROOT / directory).resolve().parent != ROOT:
         raise RuntimeError(f'Build directory must stay inside {ROOT}: {directory}')
@@ -47,6 +48,7 @@ if not exe_path.exists():
     raise FileNotFoundError(f'Expected PyInstaller output file not found: {exe_path}')
 (ROOT / 'dist' / 'build-info.json').write_text(json.dumps({
     'application': 'CIGA-Annotator',
+    'application_version': __version__,
     'csv_schema': 'line,position,start_time,end_time,speakers,listeners,targets,custom columns',
     'python_version': sys.version.split()[0],
     'pyside6_version': version('PySide6'),

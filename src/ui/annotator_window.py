@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, QUrl, Slot, Signal, QEvent, QTimer, QSignalBlocke
 from PySide6.QtGui import QAction, QColor, QKeySequence
 
 from src.core.app_settings import AppSettings
+from src.version import __version__
 from src.ui.settings_dialog import SettingsDialog
 from src.core.parsers import parse_srt, milliseconds_to_srt_time
 from src.core.characters import get_base_dir, read_characters, save_characters, validate_character_name
@@ -174,6 +175,8 @@ class VideoAnnotator(QMainWindow):
         self.mediaPlayer = QMediaPlayer()
 
         self.videoWidget = QVideoWidget()
+        # Clicking the video ends character editing and restores coding hotkeys.
+        self.videoWidget.setFocusPolicy(Qt.StrongFocus)
         self.audioOutput = QAudioOutput()
         self.mediaPlayer.setAudioOutput(self.audioOutput)
         self.mediaPlayer.setVideoOutput(self.videoWidget)
@@ -425,7 +428,7 @@ class VideoAnnotator(QMainWindow):
         msg_box.setText(
             "<h3>CIGA: Character Interaction and Graph Analysis</h3>"
             "<p><b>CIGA Annotator</b></p>"
-            "<p><b>Version: 1.0.0</b></p>"
+            f"<p><b>Version: {__version__}</b></p>"
             "<p>A annotation tool for character interaction graph analysis.</p>"
             "<p><i>Developed by: <a href='http://mediacomplab.com'>Media Comprehension Lab</a></i></p>"
             "<p>For more information, visit our <a href='https://github.com/MediaComprehensionLab/CIGA'>GitHub Repository</a>.</p>"
@@ -586,7 +589,7 @@ class VideoAnnotator(QMainWindow):
                 self.update_progress_status()
                 
                 # Automatically focus the newly created placeholder row
-                QTimer.singleShot(0, self.focus_new_character_row)
+                QTimer.singleShot(0, self._continue_character_entry)
         else:
             # Editing existing
             if col == 0:
@@ -633,6 +636,14 @@ class VideoAnnotator(QMainWindow):
         item = self.character_table.item(new_row, 0)
         self.character_table.setCurrentItem(item)
         self.character_table.editItem(item)
+
+    def _continue_character_entry(self):
+        """Continue after Enter, without stealing focus back after a video click."""
+        focused = QApplication.focusWidget()
+        if focused is self.character_table or (
+            focused is not None and self.character_table.isAncestorOf(focused)
+        ):
+            self.focus_new_character_row()
 
     def setup_subtitle_list(self):
         base_cols = ["#", "Start", "End", "Text", "Speaker", "Listener", "Target"]
@@ -954,7 +965,7 @@ class VideoAnnotator(QMainWindow):
                 return True
                 
             focused = QApplication.focusWidget()
-            if isinstance(focused, QLineEdit) or focused is self.character_table:
+            if (isinstance(focused, QLineEdit) and not focused.isReadOnly()) or focused is self.character_table:
                 return False
                 
             if self._is_hotkey(event, "next_uncoded"):

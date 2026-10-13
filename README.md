@@ -19,6 +19,7 @@
    - `Ctrl+1 / 2 / 3`: set active coding role to Speaker / Listener / Target
    - `Ctrl+Q`: cycle active coding role
    - `Alt + key`: toggle character in active coding role
+   - `Ctrl+N`: edit the blank Name cell to add a character
 - **Dynamic character management:** Add/remove/edit character names and shortcut bindings during annotation.
 - **Clickable subtitle list:** Click any row to jump to that line and restore its coding state.
 - **Subtitle filtering:** Search subtitle text and optionally show only uncoded lines.
@@ -79,7 +80,11 @@
    Click "Start Annotation" to begin. The player auto-pauses at subtitle boundaries for coding.
 
 4. **Manage Characters**
-   Use the `Manage Characters & Shortcuts` button any time to edit names and bindings.
+   Double-click a Name or Key cell in the upper-right character table to edit it.
+   Press `Ctrl+N` to add a character in its blank Name row. Enter saves the name and
+   continues to the next blank row. Click the video to finish editing and resume
+   coding shortcuts; the character table will not take focus back. Clicking a
+   read-only Speaker/Listener/Target summary also keeps coding shortcuts available.
 
 5. **Save Progress**
    - Manual save: `Ctrl+S`
